@@ -29,10 +29,12 @@ Howdy is the v0.1 recognition backend and must be installed separately.
 cargo build --release --workspace
 
 %install
-install -Dm0755 target/release/irauthd %{buildroot}%{_prefix}/local/bin/irauthd
-install -Dm0755 target/release/irauthctl %{buildroot}%{_prefix}/local/bin/irauthctl
+install -Dm0755 target/release/irauthd %{buildroot}%{_bindir}/irauthd
+install -Dm0755 target/release/irauthctl %{buildroot}%{_bindir}/irauthctl
 install -Dm0755 target/release/libpam_irauth.so %{buildroot}%{_libdir}/security/pam_irauth.so
-install -Dm0644 systemd/irauthd.service %{buildroot}%{_unitdir}/irauthd.service
+mkdir -p %{buildroot}%{_unitdir}
+sed 's#ExecStart=/usr/local/bin/irauthd#ExecStart=%{_bindir}/irauthd#' systemd/irauthd.service > %{buildroot}%{_unitdir}/irauthd.service
+chmod 0644 %{buildroot}%{_unitdir}/irauthd.service
 install -Dm0644 udev/70-irauth-vhci.rules %{buildroot}%{_udevrulesdir}/70-irauth-vhci.rules
 install -Dm0644 config/hardware.ids %{buildroot}%{_sysconfdir}/irauth/hardware.ids
 install -Dm0644 pam/irauth-passkey %{buildroot}%{_sysconfdir}/pam.d/irauth-passkey
@@ -40,8 +42,8 @@ install -Dm0644 pam/irauth-passkey %{buildroot}%{_sysconfdir}/pam.d/irauth-passk
 %files
 %license LICENSE
 %doc README.md SECURITY.md docs/
-%{_prefix}/local/bin/irauthd
-%{_prefix}/local/bin/irauthctl
+%{_bindir}/irauthd
+%{_bindir}/irauthctl
 %{_libdir}/security/pam_irauth.so
 %{_unitdir}/irauthd.service
 %{_udevrulesdir}/70-irauth-vhci.rules
