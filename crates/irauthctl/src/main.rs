@@ -95,6 +95,14 @@ fn cmd_doctor() -> Result<(), Box<dyn std::error::Error>> {
     let strict = strict_devices()?;
     check("IR/depth hardware", !strict.is_empty(), &format!("{} strict device(s)", strict.len()), &mut failed);
     check("TPM 2.0", Path::new("/dev/tpmrm0").exists(), "/dev/tpmrm0", &mut failed);
+    let tpm_access = fs::OpenOptions::new().read(true).write(true).open("/dev/tpmrm0").is_ok();
+    check("TPM session access", tpm_access, "read/write /dev/tpmrm0 (tss group)", &mut failed);
+    check("vhci_hcd", Path::new("/sys/module/vhci_hcd").exists(), "kernel module", &mut failed);
+    for group in ["irauth", "usbip", "tss"] {
+        if group_exists(group) {
+            check(&format!("group {group}"), active_group(group), "active in this login session", &mut failed);
+        }
+    }
 
     let backend = Backend::default().preflight();
     check("Howdy command", backend.howdy, "howdy", &mut failed);
@@ -300,6 +308,16 @@ fn ensure_group(group: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 fn group_exists(group: &str) -> bool {
     Command::new("getent").args(["group", group]).status().map(|s| s.success()).unwrap_or(false)
+}
+
+fn active_group(group: &str) -> bool {
+    Command::new("id")
+        .arg("-nG")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().any(|g| g == group))
+        .unwrap_or(false)
 }
 
 fn add_user_to_group(user: &str, group: &str) -> Result<(), Box<dyn std::error::Error>> {

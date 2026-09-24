@@ -3,6 +3,7 @@ use std::ffi::CStr;
 use std::io::{BufRead, BufReader, Write};
 use std::os::raw::{c_char, c_int};
 use std::os::unix::net::UnixStream;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
 
 const PAM_SUCCESS: c_int = 0;
@@ -27,7 +28,7 @@ pub unsafe extern "C" fn pam_sm_authenticate(
     argc: c_int,
     argv: *const *const c_char,
 ) -> c_int {
-    std::panic::catch_unwind(|| authenticate_inner(pamh, argc, argv)).unwrap_or(PAM_SYSTEM_ERR)
+    catch_unwind(AssertUnwindSafe(|| authenticate_inner(pamh, argc, argv))).unwrap_or(PAM_SYSTEM_ERR)
 }
 
 #[no_mangle]
