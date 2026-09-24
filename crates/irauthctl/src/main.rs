@@ -1,0 +1,381 @@
+use irauth_backend_howdy::{repair_dlib_assets, Backend};
+use irauth_core::{encode_request, Request, SOCKET_PATH};
+use irauth_hardware::{probe, strict_devices, Evidence, VERIFIED_IDS_PATH};
+use std::env;
+use std::fs;
+use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::time::Duration;
+
+extern "C" { fn geteuid() -> u32; }
+
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("irauthctl: {err}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("hardware") => cmd_hardware(),
+        Some("status") => cmd_status(),
+        Some("doctor") => cmd_doctor(),
+        Some("enroll") => cmd_enroll(args.get(1).map(String::as_str)),
+        Some("test") => cmd_test(args.get(1).map(String::as_str)),
+        Some("setup") => cmd_setup(&args[1..]),
+        Some("pam") => cmd_pam(&args[1..]),
+        Some("passkey") => irauth_passkey::cli(&args[1..]).map_err(Into::into),
+        Some("help") | Some("--help") | Some("-h") | None => { print_help(); Ok(()) }
+        Some(other) => Err(format!("unknown command: {other}").into()),
+    }
+}
+
+fn print_help() {
+    println!(r#"IRAuth control utility
+
+Usage:
+  irauthctl hardware
+  irauthctl status
+  irauthctl doctor
+  irauthctl enroll [USER]
+  irauthctl test [USER]
+  sudo irauthctl setup [--user USER] [--with-login] [--allow-no-tpm]
+  sudo irauthctl pam enable SERVICE
+  sudo irauthctl pam disable SERVICE
+  irauthctl passkey install|start|stop|status|test
+"#);
+}
+
+fn cmd_hardware() -> Result<(), Box<dyn std::error::Error>> {
+    let devices = probe()?;
+    if devices.is_empty() {
+        println!("No V4L2 video devices found.");
+        return Ok(());
+    }
+    for dev in devices {
+        let evidence = match dev.evidence {
+            Evidence::IrName => "IR name",
+            Evidence::DepthName => "depth name",
+            Evidence::VerifiedUsbId => "verified USB ID",
+            Evidence::None => "not accepted",
+        };
+        println!("{}  {:<18}  {:<16}  {}", dev.node.display(), dev.usb_id.as_deref().unwrap_or("-"), evidence, dev.name);
+    }
+    Ok(())
+}
+
+fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
+    let response = daemon_request(Request::Status)?;
+    print!("{response}");
+    Ok(())
+}
+
+fn cmd_enroll(arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    require_root()?;
+    let user = target_user(arg)?;
+    let status = Backend::default().enroll(&user)?;
+    if !status.success() { return Err("Howdy enrollment failed".into()); }
+    Ok(())
+}
+
+fn cmd_test(arg: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let user = target_user(arg)?;
+    let response = daemon_request(Request::Authenticate { user, reason: "manual test".into() })?;
+    print!("{response}");
+    if response.starts_with("OK\t") { Ok(()) } else { Err("face verification failed".into()) }
+}
+
+fn cmd_doctor() -> Result<(), Box<dyn std::error::Error>> {
+    let mut failed = 0usize;
+    let strict = strict_devices()?;
+    check("IR/depth hardware", !strict.is_empty(), &format!("{} strict device(s)", strict.len()), &mut failed);
+    check("TPM 2.0", Path::new("/dev/tpmrm0").exists(), "/dev/tpmrm0", &mut failed);
+
+    let backend = Backend::default().preflight();
+    check("Howdy command", backend.howdy, "howdy", &mut failed);
+    check("pamtester", backend.pamtester, "pamtester", &mut failed);
+    check("dlib models", backend.missing_models.is_empty(), &if backend.missing_models.is_empty() { "ready".into() } else { backend.missing_models.join(", ") }, &mut failed);
+    check("IRAuth PAM module", pam_module_path().is_some(), "pam_irauth.so", &mut failed);
+    check("Howdy-only PAM", Path::new("/etc/pam.d/irauth-howdy").is_file(), "/etc/pam.d/irauth-howdy", &mut failed);
+    check("Passkey PAM", Path::new("/etc/pam.d/irauth-passkey").is_file(), "/etc/pam.d/irauth-passkey", &mut failed);
+    check("daemon socket", Path::new(SOCKET_PATH).exists(), SOCKET_PATH, &mut failed);
+    let daemon_ok = daemon_request(Request::Ping).map(|s| s.starts_with("PONG")).unwrap_or(false);
+    check("daemon protocol", daemon_ok, "V1", &mut failed);
+    let passkey = irauth_passkey::diagnose();
+    check("passkey bridge", passkey.ready, &passkey.detail, &mut failed);
+
+    if failed == 0 {
+        println!("\nIRAuth doctor: all checks passed");
+        Ok(())
+    } else {
+        Err(format!("IRAuth doctor: {failed} check(s) failed").into())
+    }
+}
+
+fn check(name: &str, ok: bool, detail: &str, failed: &mut usize) {
+    println!("[{}] {:<22} {}", if ok { "OK" } else { "!!" }, name, detail);
+    if !ok { *failed += 1; }
+}
+
+fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    require_root()?;
+    let mut user: Option<String> = None;
+    let mut with_login = false;
+    let mut allow_no_tpm = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--user" => {
+                i += 1;
+                user = args.get(i).cloned();
+                if user.is_none() { return Err("--user requires a value".into()); }
+            }
+            "--with-login" => with_login = true,
+            "--allow-no-tpm" => allow_no_tpm = true,
+            other => return Err(format!("unknown setup option: {other}").into()),
+        }
+        i += 1;
+    }
+    let user = target_user(user.as_deref())?;
+    println!("IRAuth setup for {user}");
+
+    let strict = strict_devices()?;
+    if strict.is_empty() {
+        return Err(format!("no strict IR/depth camera detected; add a verified VID:PID to {VERIFIED_IDS_PATH} only after confirming the hardware is truly IR/depth").into());
+    }
+    for d in &strict { println!("  hardware: {} ({})", d.node.display(), d.name); }
+
+    if !Path::new("/dev/tpmrm0").exists() && !allow_no_tpm {
+        return Err("TPM 2.0 is required by strict setup; use --allow-no-tpm only for PAM-only evaluation (passkeys stay disabled)".into());
+    }
+
+    let backend = Backend::default();
+    let mut pf = backend.preflight();
+    if !pf.howdy { return Err("Howdy is not installed; IRAuth v0.1 deliberately uses Howdy as its recognition backend".into()); }
+    if !pf.pamtester { return Err("pamtester is not installed".into()); }
+    if !pf.missing_models.is_empty() {
+        println!("  repairing Howdy dlib model assets...");
+        repair_dlib_assets()?;
+        pf = backend.preflight();
+        if !pf.missing_models.is_empty() { return Err("Howdy dlib model repair did not complete".into()); }
+    }
+
+    ensure_group("irauth")?;
+    ensure_group("usbip")?;
+    for group in ["irauth", "usbip", "tss"] {
+        if group_exists(group) { add_user_to_group(&user, group)?; }
+    }
+
+    install_howdy_only_pam()?;
+    install_passkey_pam()?;
+    ensure_face_model(&backend, &user)?;
+    test_howdy_path(&user)?;
+
+    write_modules_load()?;
+    reload_udev()?;
+    run_ok(Command::new("modprobe").arg("vhci-hcd"), "load vhci-hcd")?;
+    run_ok(Command::new("systemctl").arg("daemon-reload"), "systemd daemon-reload")?;
+    run_ok(Command::new("systemctl").args(["enable", "--now", "irauthd.service"]), "enable irauthd")?;
+
+    pam_enable("sudo")?;
+    if Path::new("/etc/pam.d/polkit-1").exists() { pam_enable("polkit-1")?; }
+    if with_login && Path::new("/etc/pam.d/gdm-password").exists() { pam_enable("gdm-password")?; }
+
+    println!("\nSystem authentication is configured.");
+    println!("IMPORTANT: log out completely and log back in once so irauth/usbip/tss group membership reaches your user session.");
+    println!("After login run: irauthctl passkey install && irauthctl doctor");
+    Ok(())
+}
+
+fn cmd_pam(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    require_root()?;
+    match (args.first().map(String::as_str), args.get(1).map(String::as_str)) {
+        (Some("enable"), Some(service)) => pam_enable(service),
+        (Some("disable"), Some(service)) => pam_disable(service),
+        _ => Err("usage: irauthctl pam enable|disable SERVICE".into()),
+    }
+}
+
+fn pam_enable(service: &str) -> Result<(), Box<dyn std::error::Error>> {
+    validate_service_name(service)?;
+    let path = PathBuf::from("/etc/pam.d").join(service);
+    let content = fs::read_to_string(&path)?;
+    if content.lines().any(|l| l.contains("pam_irauth.so")) {
+        println!("  PAM {service}: already enabled");
+        return Ok(());
+    }
+    let backup = path.with_extension("irauth.bak");
+    if !backup.exists() { fs::copy(&path, &backup)?; }
+    let stanza = "# IRAuth begin\nauth sufficient pam_irauth.so reason=system\n# IRAuth end\n";
+    let mut out = String::new();
+    let mut inserted = false;
+    for line in content.lines() {
+        out.push_str(line); out.push('\n');
+        if !inserted && line.trim_start().starts_with("#%PAM") {
+            out.push_str(stanza); inserted = true;
+        }
+    }
+    if !inserted { out = format!("{stanza}{out}"); }
+    atomic_write(&path, out.as_bytes(), 0o644)?;
+    println!("  PAM {service}: enabled (backup {})", backup.display());
+    Ok(())
+}
+
+fn pam_disable(service: &str) -> Result<(), Box<dyn std::error::Error>> {
+    validate_service_name(service)?;
+    let path = PathBuf::from("/etc/pam.d").join(service);
+    let backup = path.with_extension("irauth.bak");
+    if backup.is_file() {
+        fs::copy(&backup, &path)?;
+        println!("  PAM {service}: restored {}", backup.display());
+        return Ok(());
+    }
+    let content = fs::read_to_string(&path)?;
+    let mut out = String::new();
+    let mut skip = false;
+    for line in content.lines() {
+        if line.trim() == "# IRAuth begin" { skip = true; continue; }
+        if line.trim() == "# IRAuth end" { skip = false; continue; }
+        if !skip { out.push_str(line); out.push('\n'); }
+    }
+    atomic_write(&path, out.as_bytes(), 0o644)?;
+    Ok(())
+}
+
+fn install_howdy_only_pam() -> Result<(), Box<dyn std::error::Error>> {
+    let line = discover_howdy_pam_line().ok_or("could not discover an existing Howdy PAM auth line; configure Howdy for at least one PAM service first")?;
+    let content = format!("#%PAM-1.0\n# Generated by IRAuth. Face-only backend; do not add password fallback here.\n{line}\nauth required pam_deny.so\n");
+    atomic_write(Path::new("/etc/pam.d/irauth-howdy"), content.as_bytes(), 0o644)?;
+    Ok(())
+}
+
+fn install_passkey_pam() -> Result<(), Box<dyn std::error::Error>> {
+    let content = "#%PAM-1.0\n# Generated by IRAuth.\nauth sufficient pam_irauth.so reason=passkey\nauth required pam_deny.so\n";
+    atomic_write(Path::new("/etc/pam.d/irauth-passkey"), content.as_bytes(), 0o644)?;
+    Ok(())
+}
+
+fn discover_howdy_pam_line() -> Option<String> {
+    let dir = fs::read_dir("/etc/pam.d").ok()?;
+    for entry in dir.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.ends_with("irauth-howdy") { continue; }
+        let Ok(content) = fs::read_to_string(path) else { continue };
+        for line in content.lines() {
+            let t = line.trim();
+            let lower = t.to_ascii_lowercase();
+            if t.starts_with("auth ") && lower.contains("howdy") && !t.starts_with('#') {
+                return Some(t.to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn ensure_face_model(backend: &Backend, user: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::new("howdy").arg("-U").arg(user).arg("list").output()?;
+    if output.status.success() { return Ok(()); }
+    println!("  no Howdy model for {user}; starting enrollment...");
+    let status = backend.enroll(user)?;
+    if !status.success() { return Err("Howdy face enrollment failed".into()); }
+    Ok(())
+}
+
+fn test_howdy_path(user: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!("  verifying dedicated Howdy PAM path; look at the IR camera...");
+    let status = Command::new("pamtester").args(["irauth-howdy", user, "authenticate"]).status()?;
+    if !status.success() { return Err("face verification through irauth-howdy failed".into()); }
+    Ok(())
+}
+
+fn ensure_group(group: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if group_exists(group) { return Ok(()); }
+    run_ok(Command::new("groupadd").args(["--system", group]), &format!("create {group} group"))
+}
+
+fn group_exists(group: &str) -> bool {
+    Command::new("getent").args(["group", group]).status().map(|s| s.success()).unwrap_or(false)
+}
+
+fn add_user_to_group(user: &str, group: &str) -> Result<(), Box<dyn std::error::Error>> {
+    run_ok(Command::new("usermod").args(["-aG", group, user]), &format!("add {user} to {group}"))
+}
+
+fn write_modules_load() -> Result<(), Box<dyn std::error::Error>> {
+    atomic_write(Path::new("/etc/modules-load.d/irauth-vhci.conf"), b"vhci-hcd\n", 0o644)
+}
+
+fn reload_udev() -> Result<(), Box<dyn std::error::Error>> {
+    run_ok(Command::new("udevadm").args(["control", "--reload"]), "reload udev")?;
+    Ok(())
+}
+
+fn daemon_request(req: Request) -> io::Result<String> {
+    let mut stream = UnixStream::connect(SOCKET_PATH)?;
+    stream.set_read_timeout(Some(Duration::from_secs(35)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    stream.write_all(encode_request(&req).as_bytes())?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line)?;
+    Ok(line)
+}
+
+fn target_user(explicit: Option<&str>) -> Result<String, Box<dyn std::error::Error>> {
+    if let Some(user) = explicit { return validate_user(user).map(str::to_owned); }
+    if let Ok(user) = env::var("SUDO_USER") {
+        if user != "root" { return validate_user(&user).map(str::to_owned); }
+    }
+    let user = env::var("USER").unwrap_or_default();
+    validate_user(&user).map(str::to_owned)
+}
+
+fn validate_user(user: &str) -> Result<&str, Box<dyn std::error::Error>> {
+    if user.is_empty() || !user.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) {
+        return Err("invalid user name".into());
+    }
+    Ok(user)
+}
+
+fn validate_service_name(service: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if service.is_empty() || !service.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')) {
+        return Err("invalid PAM service name".into());
+    }
+    Ok(())
+}
+
+fn require_root() -> Result<(), Box<dyn std::error::Error>> {
+    if unsafe { geteuid() } != 0 { Err("this command must run as root".into()) } else { Ok(()) }
+}
+
+fn pam_module_path() -> Option<PathBuf> {
+    [
+        "/usr/lib64/security/pam_irauth.so",
+        "/usr/lib/x86_64-linux-gnu/security/pam_irauth.so",
+        "/lib/security/pam_irauth.so",
+    ].into_iter().map(PathBuf::from).find(|p| p.is_file())
+}
+
+fn run_ok(cmd: &mut Command, what: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let status = cmd.status()?;
+    if status.success() { Ok(()) } else { Err(format!("{what} failed with {status}").into()) }
+}
+
+fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = path.with_extension("irauth.tmp");
+    fs::write(&tmp, bytes)?;
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+    fs::rename(tmp, path)?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn output_text(output: &Output) -> String {
+    let mut s = String::from_utf8_lossy(&output.stdout).into_owned();
+    s.push_str(&String::from_utf8_lossy(&output.stderr));
+    s
+}
