@@ -62,15 +62,19 @@ impl Default for Backend {
 
 impl Backend {
     pub fn new(service: impl Into<String>) -> Self {
-        Self { pam_service: service.into() }
+        Self {
+            pam_service: service.into(),
+        }
     }
 
     pub fn preflight(&self) -> Preflight {
         let dlib_dir = find_dlib_dir();
-        let missing_models = dlib_dir
-            .as_deref()
-            .map(missing_models)
-            .unwrap_or_else(|| REQUIRED_DLIB_MODELS.iter().map(|s| (*s).to_owned()).collect());
+        let missing_models = dlib_dir.as_deref().map(missing_models).unwrap_or_else(|| {
+            REQUIRED_DLIB_MODELS
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect()
+        });
         Preflight {
             howdy: command_exists("howdy"),
             pamtester: command_exists("pamtester"),
@@ -81,7 +85,10 @@ impl Backend {
 
     pub fn authenticate(&self, user: &str, reason: &str) -> io::Result<AuthResult> {
         if !valid_username(user) {
-            return Ok(AuthResult { approved: false, detail: "invalid user name".into() });
+            return Ok(AuthResult {
+                approved: false,
+                detail: "invalid user name".into(),
+            });
         }
         let mut child = Command::new("pamtester")
             .arg(&self.pam_service)
@@ -97,48 +104,77 @@ impl Backend {
             if child.try_wait()?.is_some() {
                 let output = child.wait_with_output()?;
                 let detail = combined_output(&output.stdout, &output.stderr);
-                return Ok(AuthResult { approved: output.status.success(), detail });
+                return Ok(AuthResult {
+                    approved: output.status.success(),
+                    detail,
+                });
             }
             if started.elapsed() >= authentication_timeout_hint() {
                 let _ = child.kill();
                 let output = child.wait_with_output()?;
                 let mut detail = combined_output(&output.stdout, &output.stderr);
-                if !detail.is_empty() { detail.push_str(" | "); }
+                if !detail.is_empty() {
+                    detail.push_str(" | ");
+                }
                 detail.push_str("IRAuth backend timeout after 30s");
-                return Ok(AuthResult { approved: false, detail });
+                return Ok(AuthResult {
+                    approved: false,
+                    detail,
+                });
             }
             thread::sleep(Duration::from_millis(100));
         }
     }
 
     pub fn enroll(&self, user: &str) -> io::Result<ExitStatus> {
-        Command::new("howdy").arg("-U").arg(user).arg("add").status()
+        Command::new("howdy")
+            .arg("-U")
+            .arg(user)
+            .arg("add")
+            .status()
     }
 
     pub fn list(&self, user: &str) -> io::Result<ExitStatus> {
-        Command::new("howdy").arg("-U").arg(user).arg("list").status()
+        Command::new("howdy")
+            .arg("-U")
+            .arg(user)
+            .arg("list")
+            .status()
     }
 }
 
 pub fn find_howdy_config() -> Option<PathBuf> {
-    HOWDY_CONFIGS.iter().map(PathBuf::from).find(|p| p.is_file())
+    HOWDY_CONFIGS
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.is_file())
 }
 
 pub fn configured_camera() -> io::Result<Option<CameraConfig>> {
-    let Some(config_path) = find_howdy_config() else { return Ok(None) };
+    let Some(config_path) = find_howdy_config() else {
+        return Ok(None);
+    };
     let content = fs::read_to_string(&config_path)?;
-    let Some(device) = parse_video_device_path(&content) else { return Ok(None) };
+    let Some(device) = parse_video_device_path(&content) else {
+        return Ok(None);
+    };
     if device.eq_ignore_ascii_case("none") {
         return Ok(None);
     }
-    Ok(Some(CameraConfig { config_path, device_path: PathBuf::from(device) }))
+    Ok(Some(CameraConfig {
+        config_path,
+        device_path: PathBuf::from(device),
+    }))
 }
 
 /// Bind Howdy's [video] device_path to an already-validated IR/depth V4L2
 /// node. The caller is responsible for enforcing the hardware policy first.
 pub fn bind_camera(device: &Path) -> io::Result<PathBuf> {
     if !device.is_absolute() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "camera path must be absolute"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "camera path must be absolute",
+        ));
     }
     let config = find_howdy_config()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Howdy config.ini not found"))?;
@@ -169,7 +205,12 @@ pub fn missing_models(dir: &Path) -> Vec<String> {
 }
 
 pub fn repair_dlib_assets() -> io::Result<()> {
-    let dir = find_dlib_dir().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Howdy dlib-data directory not found"))?;
+    let dir = find_dlib_dir().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "Howdy dlib-data directory not found",
+        )
+    })?;
     let mut perms = fs::metadata(&dir)?.permissions();
     #[cfg(unix)]
     {
@@ -188,13 +229,19 @@ pub fn repair_dlib_assets() -> io::Result<()> {
             format!("missing dlib models and installer: {}", installer.display()),
         ));
     }
-    let status = Command::new("/bin/bash").arg(&installer).current_dir(&dir).status()?;
+    let status = Command::new("/bin/bash")
+        .arg(&installer)
+        .current_dir(&dir)
+        .status()?;
     if !status.success() {
         return Err(io::Error::other(format!("{} failed", installer.display())));
     }
     let missing = missing_models(&dir);
     if !missing.is_empty() {
-        return Err(io::Error::other(format!("dlib installer completed but models are still missing: {}", missing.join(", "))));
+        return Err(io::Error::other(format!(
+            "dlib installer completed but models are still missing: {}",
+            missing.join(", ")
+        )));
     }
     normalize_model_permissions(&dir)
 }
@@ -224,11 +271,17 @@ fn parse_video_device_path(content: &str) -> Option<String> {
             in_video = line[1..line.len() - 1].trim().eq_ignore_ascii_case("video");
             continue;
         }
-        if !in_video { continue; }
-        let Some((key, value)) = line.split_once('=') else { continue };
+        if !in_video {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
         if key.trim().eq_ignore_ascii_case("device_path") {
-            let value = value.split(|c| c == '#' || c == ';').next().unwrap_or("").trim();
-            if !value.is_empty() { return Some(value.to_owned()); }
+            let value = value.split(['#', ';']).next().unwrap_or("").trim();
+            if !value.is_empty() {
+                return Some(value.to_owned());
+            }
         }
     }
     None
@@ -246,7 +299,9 @@ fn replace_video_device_path(content: &str, device: &str) -> io::Result<String> 
                 out.push(format!("device_path = {device}"));
                 replaced = true;
             }
-            in_video = trimmed[1..trimmed.len() - 1].trim().eq_ignore_ascii_case("video");
+            in_video = trimmed[1..trimmed.len() - 1]
+                .trim()
+                .eq_ignore_ascii_case("video");
             saw_video |= in_video;
             out.push(raw.to_owned());
             continue;
@@ -263,7 +318,10 @@ fn replace_video_device_path(content: &str, device: &str) -> io::Result<String> 
         out.push(raw.to_owned());
     }
     if !saw_video {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Howdy config has no [video] section"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Howdy config has no [video] section",
+        ));
     }
     if !replaced {
         out.push(format!("device_path = {device}"));
@@ -286,17 +344,23 @@ fn combined_output(stdout: &[u8], stderr: &[u8]) -> String {
     let mut s = String::from_utf8_lossy(stdout).trim().to_owned();
     let e = String::from_utf8_lossy(stderr).trim().to_owned();
     if !e.is_empty() {
-        if !s.is_empty() { s.push_str(" | "); }
+        if !s.is_empty() {
+            s.push_str(" | ");
+        }
         s.push_str(&e);
     }
-    if s.len() > 512 { s.truncate(512); }
+    if s.len() > 512 {
+        s.truncate(512);
+    }
     s
 }
 
 fn valid_username(user: &str) -> bool {
     !user.is_empty()
         && user.len() <= 64
-        && user.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        && user
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
 pub fn authentication_timeout_hint() -> Duration {

@@ -29,11 +29,17 @@ pub struct VideoDevice {
 }
 
 pub fn probe() -> io::Result<Vec<VideoDevice>> {
-    probe_at(Path::new("/sys/class/video4linux"), Path::new(VERIFIED_IDS_PATH))
+    probe_at(
+        Path::new("/sys/class/video4linux"),
+        Path::new(VERIFIED_IDS_PATH),
+    )
 }
 
 pub fn strict_devices() -> io::Result<Vec<VideoDevice>> {
-    Ok(probe()?.into_iter().filter(|d| d.evidence.is_strict()).collect())
+    Ok(probe()?
+        .into_iter()
+        .filter(|d| d.evidence.is_strict())
+        .collect())
 }
 
 /// Resolve a configured V4L2 path (including /dev/v4l/by-path symlinks) and
@@ -107,13 +113,21 @@ fn token_ir(lower: &str) -> bool {
 }
 
 fn read_trimmed(path: PathBuf) -> Option<String> {
-    fs::read_to_string(path).ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+    fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
 }
 
 fn read_verified_ids(path: &Path) -> io::Result<BTreeSet<String>> {
     let mut ids = BTreeSet::new();
     for line in fs::read_to_string(path)?.lines() {
-        let line = line.split('#').next().unwrap_or("").trim().to_ascii_lowercase();
+        let line = line
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
         if valid_usb_selector(&line) {
             ids.insert(line);
         }
@@ -122,17 +136,22 @@ fn read_verified_ids(path: &Path) -> io::Result<BTreeSet<String>> {
 }
 
 fn valid_usb_id(s: &str) -> bool {
-    let Some((vid, pid)) = s.split_once(':') else { return false };
+    let Some((vid, pid)) = s.split_once(':') else {
+        return false;
+    };
     vid.len() == 4
         && pid.len() == 4
-        && vid.chars().chain(pid.chars()).all(|c| c.is_ascii_hexdigit())
+        && vid
+            .chars()
+            .chain(pid.chars())
+            .all(|c| c.is_ascii_hexdigit())
 }
 
 fn valid_usb_selector(s: &str) -> bool {
-    let Some((id, interface)) = s.split_once('@') else { return false };
-    valid_usb_id(id)
-        && interface.len() == 2
-        && interface.chars().all(|c| c.is_ascii_hexdigit())
+    let Some((id, interface)) = s.split_once('@') else {
+        return false;
+    };
+    valid_usb_id(id) && interface.len() == 2 && interface.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn find_usb_info(video_class: &Path) -> Option<(Option<String>, Option<String>)> {
@@ -162,7 +181,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir() -> PathBuf {
-        let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let p = std::env::temp_dir().join(format!("irauth-hw-{n}"));
         fs::create_dir_all(&p).unwrap();
         p

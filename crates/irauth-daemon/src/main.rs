@@ -1,5 +1,7 @@
 use irauth_backend_howdy::{configured_camera, Backend};
-use irauth_core::{decode_request, encode_response, DaemonStatus, Request, Response, SOCKET_GROUP, SOCKET_PATH};
+use irauth_core::{
+    decode_request, encode_response, DaemonStatus, Request, Response, SOCKET_GROUP, SOCKET_PATH,
+};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
@@ -26,7 +28,13 @@ struct UCred {
 }
 
 extern "C" {
-    fn getsockopt(fd: c_int, level: c_int, optname: c_int, optval: *mut c_void, optlen: *mut u32) -> c_int;
+    fn getsockopt(
+        fd: c_int,
+        level: c_int,
+        optname: c_int,
+        optval: *mut c_void,
+        optlen: *mut u32,
+    ) -> c_int;
     fn chown(path: *const c_char, owner: u32, group: u32) -> c_int;
 }
 
@@ -123,7 +131,10 @@ fn authenticate(peer_uid: u32, user: &str, reason: &str, state: &State) -> Respo
     match irauth_hardware::strict_device_for_path(&configured.device_path) {
         Ok(Some(_)) => {}
         Ok(None) => {
-            eprintln!("irauthd: denied non-IR Howdy camera {}", configured.device_path.display());
+            eprintln!(
+                "irauthd: denied non-IR Howdy camera {}",
+                configured.device_path.display()
+            );
             return Response::Error("Howdy is not bound to a strict IR/depth camera".into());
         }
         Err(err) => {
@@ -132,7 +143,10 @@ fn authenticate(peer_uid: u32, user: &str, reason: &str, state: &State) -> Respo
         }
     }
 
-    eprintln!("irauthd: face verification requested user={user} reason={reason} camera={}", configured.device_path.display());
+    eprintln!(
+        "irauthd: face verification requested user={user} reason={reason} camera={}",
+        configured.device_path.display()
+    );
     match state.backend.authenticate(user, reason) {
         Ok(result) if result.approved => {
             eprintln!("irauthd: APPROVED user={user}");
@@ -154,23 +168,38 @@ fn status(backend: &Backend) -> DaemonStatus {
     let camera_strict = configured_camera()
         .ok()
         .flatten()
-        .and_then(|c| irauth_hardware::strict_device_for_path(&c.device_path).ok().flatten())
+        .and_then(|c| {
+            irauth_hardware::strict_device_for_path(&c.device_path)
+                .ok()
+                .flatten()
+        })
         .is_some();
     DaemonStatus {
-        backend: if preflight.howdy && preflight.pamtester && preflight.missing_models.is_empty() && camera_strict {
+        backend: if preflight.howdy
+            && preflight.pamtester
+            && preflight.missing_models.is_empty()
+            && camera_strict
+        {
             "howdy-ready-ir-bound".into()
         } else {
             "howdy-incomplete".into()
         },
-        strict_ir_devices: irauth_hardware::strict_devices().map(|v| v.len()).unwrap_or(0),
+        strict_ir_devices: irauth_hardware::strict_devices()
+            .map(|v| v.len())
+            .unwrap_or(0),
         tpm_present: Path::new("/dev/tpmrm0").exists(),
     }
 }
 
 fn rate_limit(uid: u32, map: &Mutex<HashMap<u32, Instant>>) -> bool {
-    let Ok(mut map) = map.lock() else { return false };
+    let Ok(mut map) = map.lock() else {
+        return false;
+    };
     let now = Instant::now();
-    if map.get(&uid).is_some_and(|last| now.duration_since(*last) < MIN_REQUEST_INTERVAL) {
+    if map
+        .get(&uid)
+        .is_some_and(|last| now.duration_since(*last) < MIN_REQUEST_INTERVAL)
+    {
         return false;
     }
     map.insert(uid, now);
@@ -178,12 +207,19 @@ fn rate_limit(uid: u32, map: &Mutex<HashMap<u32, Instant>>) -> bool {
 }
 
 fn peer_cred(stream: &UnixStream) -> io::Result<UCred> {
-    let mut cred = UCred { _pid: 0, uid: u32::MAX, _gid: u32::MAX };
+    let mut cred = UCred {
+        _pid: 0,
+        uid: u32::MAX,
+        _gid: u32::MAX,
+    };
     let mut len = std::mem::size_of::<UCred>() as u32;
     let rc = unsafe {
         getsockopt(
-            stream.as_raw_fd(), SOL_SOCKET, SO_PEERCRED,
-            (&mut cred as *mut UCred).cast::<c_void>(), &mut len,
+            stream.as_raw_fd(),
+            SOL_SOCKET,
+            SO_PEERCRED,
+            (&mut cred as *mut UCred).cast::<c_void>(),
+            &mut len,
         )
     };
     if rc != 0 {
@@ -193,32 +229,52 @@ fn peer_cred(stream: &UnixStream) -> io::Result<UCred> {
 }
 
 fn uid_for_user(user: &str) -> Option<u32> {
-    fs::read_to_string("/etc/passwd").ok()?.lines().find_map(|line| {
-        let mut p = line.split(':');
-        let name = p.next()?;
-        let _pw = p.next()?;
-        let uid = p.next()?;
-        if name == user { uid.parse().ok() } else { None }
-    })
+    fs::read_to_string("/etc/passwd")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            let mut p = line.split(':');
+            let name = p.next()?;
+            let _pw = p.next()?;
+            let uid = p.next()?;
+            if name == user {
+                uid.parse().ok()
+            } else {
+                None
+            }
+        })
 }
 
 fn gid_for_group(group: &str) -> Option<u32> {
-    fs::read_to_string("/etc/group").ok()?.lines().find_map(|line| {
-        let mut p = line.split(':');
-        let name = p.next()?;
-        let _pw = p.next()?;
-        let gid = p.next()?;
-        if name == group { gid.parse().ok() } else { None }
-    })
+    fs::read_to_string("/etc/group")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            let mut p = line.split(':');
+            let name = p.next()?;
+            let _pw = p.next()?;
+            let gid = p.next()?;
+            if name == group {
+                gid.parse().ok()
+            } else {
+                None
+            }
+        })
 }
 
 fn secure_socket(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o660))?;
-    let gid = gid_for_group(SOCKET_GROUP)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("group {SOCKET_GROUP} does not exist")))?;
+    let gid = gid_for_group(SOCKET_GROUP).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("group {SOCKET_GROUP} does not exist"),
+        )
+    })?;
     let cpath = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "socket path contains NUL"))?;
     let rc = unsafe { chown(cpath.as_ptr(), u32::MAX, gid) };
-    if rc != 0 { return Err(io::Error::last_os_error()); }
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }

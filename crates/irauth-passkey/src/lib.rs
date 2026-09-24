@@ -23,7 +23,11 @@ pub fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         Some("stop") => systemctl(&["stop", SERVICE_NAME]),
         Some("status") => {
             let d = diagnose();
-            println!("{}: {}", if d.ready { "ready" } else { "not ready" }, d.detail);
+            println!(
+                "{}: {}",
+                if d.ready { "ready" } else { "not ready" },
+                d.detail
+            );
             Ok(())
         }
         Some("test") => test(),
@@ -32,19 +36,40 @@ pub fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub fn diagnose() -> Diagnosis {
-    let Ok(home) = home_dir() else { return Diagnosis { ready: false, detail: "HOME unavailable".into() } };
+    let Ok(home) = home_dir() else {
+        return Diagnosis {
+            ready: false,
+            detail: "HOME unavailable".into(),
+        };
+    };
     let binary = home.join(".local/bin/howdy-bridge");
     let sealed = home.join(".config/howdy-passkey-bridge/vault.key.tpm");
     let unit = home.join(".config/systemd/user").join(SERVICE_NAME);
-    let active = Command::new("systemctl").args(["--user", "is-active", "--quiet", SERVICE_NAME]).status().map(|s| s.success()).unwrap_or(false);
+    let active = Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", SERVICE_NAME])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
     let mut missing = Vec::new();
-    if !binary.is_file() { missing.push("bridge binary"); }
-    if !sealed.is_file() { missing.push("TPM-sealed vault key"); }
-    if !unit.is_file() { missing.push("user service"); }
-    if !active { missing.push("running service"); }
+    if !binary.is_file() {
+        missing.push("bridge binary");
+    }
+    if !sealed.is_file() {
+        missing.push("TPM-sealed vault key");
+    }
+    if !unit.is_file() {
+        missing.push("user service");
+    }
+    if !active {
+        missing.push("running service");
+    }
     Diagnosis {
         ready: missing.is_empty(),
-        detail: if missing.is_empty() { "TPM-backed bridge active".into() } else { format!("missing: {}", missing.join(", ")) },
+        detail: if missing.is_empty() {
+            "TPM-backed bridge active".into()
+        } else {
+            format!("missing: {}", missing.join(", "))
+        },
     }
 }
 
@@ -88,7 +113,10 @@ fn install() -> Result<(), Box<dyn std::error::Error>> {
             cmd.arg("--tpm-init").env("HOWDY_BRIDGE_PASSPHRASE", &pass);
             run_ok(&mut cmd, "migrate passkey vault to TPM")?;
         } else {
-            run_ok(Command::new(&binary).arg("--tpm-init"), "initialize TPM-sealed passkey vault")?;
+            run_ok(
+                Command::new(&binary).arg("--tpm-init"),
+                "initialize TPM-sealed passkey vault",
+            )?;
         }
     }
 
@@ -113,10 +141,16 @@ fn adopt() -> Result<(), Box<dyn std::error::Error>> {
     }
     let sealed = config.join("vault.key.tpm");
     if !sealed.is_file() {
-        return Err(format!("TPM-sealed passkey key not found at {}; IRAuth will not adopt a software-only vault", sealed.display()).into());
+        return Err(format!(
+            "TPM-sealed passkey key not found at {}; IRAuth will not adopt a software-only vault",
+            sealed.display()
+        )
+        .into());
     }
     configure_service(&binary, &config)?;
-    println!("Adopted the existing TPM-backed passkey bridge; existing credentials were left untouched.");
+    println!(
+        "Adopted the existing TPM-backed passkey bridge; existing credentials were left untouched."
+    );
     Ok(())
 }
 
@@ -125,7 +159,8 @@ fn configure_service(binary: &Path, config: &Path) -> Result<(), Box<dyn std::er
     let unit_dir = home.join(".config/systemd/user");
     fs::create_dir_all(&unit_dir)?;
     let unit = unit_dir.join(SERVICE_NAME);
-    let body = format!(r#"[Unit]
+    let body = format!(
+        r#"[Unit]
 Description=IRAuth TPM-backed virtual FIDO2 authenticator
 After=graphical-session.target
 
@@ -138,12 +173,17 @@ NoNewPrivileges=true
 
 [Install]
 WantedBy=default.target
-"#, binary.display(), config.display());
+"#,
+        binary.display(),
+        config.display()
+    );
     atomic_write(&unit, body.as_bytes(), 0o644)?;
 
     // Avoid two USB/IP authenticators fighting for the same endpoint when a
     // previous manual howdy-as-passkey installation exists.
-    let _ = Command::new("systemctl").args(["--user", "disable", "--now", "howdy-passkey-bridge.service"]).status();
+    let _ = Command::new("systemctl")
+        .args(["--user", "disable", "--now", "howdy-passkey-bridge.service"])
+        .status();
     systemctl(&["daemon-reload"])?;
     systemctl(&["enable", "--now", SERVICE_NAME])?;
     Ok(())
@@ -168,18 +208,38 @@ fn require_tpm_access() -> Result<(), Box<dyn std::error::Error>> {
 
 fn checkout_upstream(source: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if !source.join(".git").is_dir() {
-        if source.exists() { fs::remove_dir_all(source)?; }
-        run_ok(Command::new("git").args(["clone", "--no-checkout", UPSTREAM_URL]).arg(source), "clone passkey bridge")?;
+        if source.exists() {
+            fs::remove_dir_all(source)?;
+        }
+        run_ok(
+            Command::new("git")
+                .args(["clone", "--no-checkout", UPSTREAM_URL])
+                .arg(source),
+            "clone passkey bridge",
+        )?;
     }
-    run_ok(Command::new("git").args(["fetch", "--depth", "1", "origin", PINNED_COMMIT]).current_dir(source), "fetch pinned passkey bridge")?;
-    run_ok(Command::new("git").args(["checkout", "--detach", PINNED_COMMIT]).current_dir(source), "checkout pinned passkey bridge")?;
+    run_ok(
+        Command::new("git")
+            .args(["fetch", "--depth", "1", "origin", PINNED_COMMIT])
+            .current_dir(source),
+        "fetch pinned passkey bridge",
+    )?;
+    run_ok(
+        Command::new("git")
+            .args(["checkout", "--detach", PINNED_COMMIT])
+            .current_dir(source),
+        "checkout pinned passkey bridge",
+    )?;
     Ok(())
 }
 
 fn test() -> Result<(), Box<dyn std::error::Error>> {
     let user = env::var("USER").map_err(|_| "USER is not set")?;
     println!("==> face verification through pam_irauth (look at the IR camera)");
-    run_ok(Command::new("pamtester").args(["irauth-passkey", &user, "authenticate"]), "passkey PAM verification")?;
+    run_ok(
+        Command::new("pamtester").args(["irauth-passkey", &user, "authenticate"]),
+        "passkey PAM verification",
+    )?;
     if command_exists("fido2-token") {
         let output = Command::new("fido2-token").arg("-L").output()?;
         let text = String::from_utf8_lossy(&output.stdout);
@@ -194,29 +254,48 @@ fn test() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn systemctl(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("systemctl").arg("--user").args(args).status()?;
-    if status.success() { Ok(()) } else { Err(format!("systemctl --user {} failed", args.join(" ")).into()) }
+    let status = Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("systemctl --user {} failed", args.join(" ")).into())
+    }
 }
 
 fn prompt_secret(prompt: &str) -> io::Result<String> {
-    print!("{prompt}"); io::stdout().flush()?;
+    print!("{prompt}");
+    io::stdout().flush()?;
     let _ = Command::new("stty").arg("-echo").status();
     let mut input = String::new();
     let result = io::stdin().read_line(&mut input);
     let _ = Command::new("stty").arg("echo").status();
     println!();
     result?;
-    let secret = input.trim_end_matches(|c| c == '\r' || c == '\n').to_owned();
-    if secret.is_empty() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty passphrase")); }
+    let secret = input.trim_end_matches(['\r', '\n']).to_owned();
+    if secret.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "empty passphrase",
+        ));
+    }
     Ok(secret)
 }
 
 fn home_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    env::var_os("HOME").map(PathBuf::from).ok_or_else(|| "HOME is not set".into())
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| "HOME is not set".into())
 }
 
 fn require_command(name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    if command_exists(name) { Ok(()) } else { Err(format!("required command not found: {name}").into()) }
+    if command_exists(name) {
+        Ok(())
+    } else {
+        Err(format!("required command not found: {name}").into())
+    }
 }
 
 fn command_exists(name: &str) -> bool {
@@ -226,8 +305,16 @@ fn command_exists(name: &str) -> bool {
 }
 
 fn run_ok(cmd: &mut Command, what: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let status = cmd.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit()).status()?;
-    if status.success() { Ok(()) } else { Err(format!("{what} failed with {status}").into()) }
+    let status = cmd
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{what} failed with {status}").into())
+    }
 }
 
 fn atomic_write(path: &Path, data: &[u8], mode: u32) -> io::Result<()> {
@@ -237,4 +324,6 @@ fn atomic_write(path: &Path, data: &[u8], mode: u32) -> io::Result<()> {
     fs::rename(tmp, path)
 }
 
-extern "C" { fn geteuid() -> u32; }
+extern "C" {
+    fn geteuid() -> u32;
+}

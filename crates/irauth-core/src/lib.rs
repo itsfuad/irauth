@@ -51,9 +51,7 @@ impl fmt::Display for ProtocolError {
 impl std::error::Error for ProtocolError {}
 
 fn valid_field(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 256
-        && !s.bytes().any(|b| matches!(b, b'\n' | b'\r' | b'\t' | 0))
+    !s.is_empty() && s.len() <= 256 && !s.bytes().any(|b| matches!(b, b'\n' | b'\r' | b'\t' | 0))
 }
 
 pub fn encode_request(req: &Request) -> String {
@@ -67,7 +65,7 @@ pub fn encode_request(req: &Request) -> String {
 }
 
 pub fn decode_request(line: &str) -> Result<Request, ProtocolError> {
-    let line = line.trim_end_matches(|c| c == '\r' || c == '\n');
+    let line = line.trim_end_matches(['\r', '\n']);
     if line.is_empty() {
         return Err(ProtocolError::Empty);
     }
@@ -114,7 +112,13 @@ pub fn encode_response(resp: &Response) -> String {
 
 fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if matches!(c, '\n' | '\r' | '\t' | '\0') { ' ' } else { c })
+        .map(|c| {
+            if matches!(c, '\n' | '\r' | '\t' | '\0') {
+                ' '
+            } else {
+                c
+            }
+        })
         .take(256)
         .collect()
 }

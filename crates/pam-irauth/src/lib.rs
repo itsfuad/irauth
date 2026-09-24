@@ -16,6 +16,14 @@ extern "C" {
     fn pam_get_user(pamh: *mut c_void, user: *mut *const c_char, prompt: *const c_char) -> c_int;
 }
 
+/// Authenticate a user through the IRAuth daemon.
+///
+/// # Safety
+///
+/// This function is called by the PAM runtime. `pamh` must be a valid PAM
+/// handle supplied by PAM. When `argc` is greater than zero, `argv` must point
+/// to at least `argc` valid pointers to NUL-terminated C strings for the
+/// duration of this call.
 #[no_mangle]
 pub unsafe extern "C" fn pam_sm_authenticate(
     pamh: *mut c_void,
@@ -23,9 +31,16 @@ pub unsafe extern "C" fn pam_sm_authenticate(
     argc: c_int,
     argv: *const *const c_char,
 ) -> c_int {
-    catch_unwind(AssertUnwindSafe(|| authenticate_inner(pamh, argc, argv))).unwrap_or(PAM_SYSTEM_ERR)
+    catch_unwind(AssertUnwindSafe(|| authenticate_inner(pamh, argc, argv)))
+        .unwrap_or(PAM_SYSTEM_ERR)
 }
 
+/// Handle PAM credential establishment.
+///
+/// # Safety
+///
+/// This function is called by the PAM runtime. Any pointers passed by PAM must
+/// satisfy the PAM module ABI requirements for the duration of this call.
 #[no_mangle]
 pub unsafe extern "C" fn pam_sm_setcred(
     _pamh: *mut c_void,
@@ -37,11 +52,17 @@ pub unsafe extern "C" fn pam_sm_setcred(
 }
 
 fn authenticate_inner(pamh: *mut c_void, argc: c_int, argv: *const *const c_char) -> c_int {
-    if pamh.is_null() { return PAM_SERVICE_ERR; }
+    if pamh.is_null() {
+        return PAM_SERVICE_ERR;
+    }
     let mut user_ptr: *const c_char = std::ptr::null();
     let rc = unsafe { pam_get_user(pamh, &mut user_ptr, std::ptr::null()) };
-    if rc != PAM_SUCCESS || user_ptr.is_null() { return PAM_AUTH_ERR; }
-    let Ok(user) = unsafe { CStr::from_ptr(user_ptr) }.to_str() else { return PAM_AUTH_ERR };
+    if rc != PAM_SUCCESS || user_ptr.is_null() {
+        return PAM_AUTH_ERR;
+    }
+    let Ok(user) = unsafe { CStr::from_ptr(user_ptr) }.to_str() else {
+        return PAM_AUTH_ERR;
+    };
     let reason = parse_reason(argc, argv).unwrap_or_else(|| "pam".to_owned());
     match request_auth(user, &reason) {
         Ok(true) => PAM_SUCCESS,
@@ -54,20 +75,30 @@ fn request_auth(user: &str, reason: &str) -> std::io::Result<bool> {
     let mut stream = UnixStream::connect(SOCKET_PATH)?;
     stream.set_read_timeout(Some(Duration::from_secs(35)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    stream.write_all(encode_request(&Request::Authenticate {
-        user: user.to_owned(), reason: reason.to_owned(),
-    }).as_bytes())?;
+    stream.write_all(
+        encode_request(&Request::Authenticate {
+            user: user.to_owned(),
+            reason: reason.to_owned(),
+        })
+        .as_bytes(),
+    )?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line)?;
     Ok(line.starts_with("OK\t"))
 }
 
 fn parse_reason(argc: c_int, argv: *const *const c_char) -> Option<String> {
-    if argc <= 0 || argv.is_null() { return None; }
+    if argc <= 0 || argv.is_null() {
+        return None;
+    }
     for i in 0..argc {
         let ptr = unsafe { *argv.add(i as usize) };
-        if ptr.is_null() { continue; }
-        let Ok(arg) = unsafe { CStr::from_ptr(ptr) }.to_str() else { continue };
+        if ptr.is_null() {
+            continue;
+        }
+        let Ok(arg) = unsafe { CStr::from_ptr(ptr) }.to_str() else {
+            continue;
+        };
         if let Some(reason) = arg.strip_prefix("reason=") {
             if !reason.is_empty() && reason.len() <= 128 {
                 return Some(reason.to_owned());
