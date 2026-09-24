@@ -67,7 +67,7 @@ pub fn encode_request(req: &Request) -> String {
 }
 
 pub fn decode_request(line: &str) -> Result<Request, ProtocolError> {
-    let line = line.trim_end_matches(['\r', '\n']);
+    let line = line.trim_end_matches(|c| c == '\r' || c == '\n');
     if line.is_empty() {
         return Err(ProtocolError::Empty);
     }

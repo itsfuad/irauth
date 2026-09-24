@@ -102,7 +102,7 @@ fn install() -> Result<(), Box<dyn std::error::Error>> {
     let unit = unit_dir.join(SERVICE_NAME);
     let body = format!(r#"[Unit]
 Description=IRAuth TPM-backed virtual FIDO2 authenticator
-After=graphical-session.target irauthd.service
+After=graphical-session.target
 
 [Service]
 Type=simple
@@ -165,7 +165,7 @@ fn prompt_secret(prompt: &str) -> io::Result<String> {
     let _ = Command::new("stty").arg("echo").status();
     println!();
     result?;
-    let secret = input.trim_end_matches(['\r', '\n']).to_owned();
+    let secret = input.trim_end_matches(|c| c == '\r' || c == '\n').to_owned();
     if secret.is_empty() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty passphrase")); }
     Ok(secret)
 }
@@ -179,7 +179,9 @@ fn require_command(name: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn command_exists(name: &str) -> bool {
-    env::var_os("PATH").into_iter().flat_map(env::split_paths).any(|p| p.join(name).is_file())
+    env::var_os("PATH")
+        .map(|path| env::split_paths(&path).any(|p| p.join(name).is_file()))
+        .unwrap_or(false)
 }
 
 fn run_ok(cmd: &mut Command, what: &str) -> Result<(), Box<dyn std::error::Error>> {

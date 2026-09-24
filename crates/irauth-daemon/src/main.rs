@@ -6,6 +6,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
 use std::os::raw::{c_int, c_void};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
@@ -186,7 +187,7 @@ fn secure_socket(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o660))?;
     let gid = gid_for_group(SOCKET_GROUP)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("group {SOCKET_GROUP} does not exist")))?;
-    let cpath = CString::new(path.as_os_str().as_encoded_bytes())
+    let cpath = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "socket path contains NUL"))?;
     let rc = unsafe { chown(cpath.as_ptr(), u32::MAX, gid) };
     if rc != 0 { return Err(io::Error::last_os_error()); }

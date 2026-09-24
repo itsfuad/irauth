@@ -124,11 +124,11 @@ pub fn repair_dlib_assets() -> io::Result<()> {
     }
     let status = Command::new("/bin/bash").arg(&installer).current_dir(&dir).status()?;
     if !status.success() {
-        return Err(io::Error::other(format!("{} failed", installer.display())));
+        return Err(io::Error::new(io::ErrorKind::Other, format!("{} failed", installer.display())));
     }
     let missing = missing_models(&dir);
     if !missing.is_empty() {
-        return Err(io::Error::other(format!("dlib installer completed but models are still missing: {}", missing.join(", "))));
+        return Err(io::Error::new(io::ErrorKind::Other, format!("dlib installer completed but models are still missing: {}", missing.join(", "))));
     }
     normalize_model_permissions(&dir)
 }
@@ -152,9 +152,8 @@ fn command_exists(command: &str) -> bool {
         return Path::new(command).is_file();
     }
     env::var_os("PATH")
-        .into_iter()
-        .flat_map(env::split_paths)
-        .any(|dir| dir.join(command).is_file())
+        .map(|path| env::split_paths(&path).any(|dir| dir.join(command).is_file()))
+        .unwrap_or(false)
 }
 
 fn combined_output(stdout: &[u8], stderr: &[u8]) -> String {

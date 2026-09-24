@@ -2,7 +2,7 @@
 # unit with absolute HOME paths and the pinned bridge binary.
 [Unit]
 Description=IRAuth TPM-backed virtual FIDO2 authenticator
-After=graphical-session.target irauthd.service
+After=graphical-session.target
 
 [Service]
 Type=simple
