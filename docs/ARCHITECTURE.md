@@ -11,7 +11,7 @@ PAM consumer (sudo / GDM / polkit / pamtester)
  /run/irauth/irauthd.sock
         |
         v
-     irauthd  -- SO_PEERCRED + serialization + rate limit
+     irauthd  -- SO_PEERCRED + bounded queue + serialization + rate limit
         |
         +--> re-read Howdy device_path
         |        |

@@ -53,9 +53,10 @@ irauthctl doctor
 ```
 
 Adoption only rewires the user service. It verifies the existing bridge binary,
-non-empty vault, TPM-sealed key, and active service; it never runs `--tpm-init`,
-rewrites the vault/key, or registers credentials. Then run `irauthctl passkey test`
-to check the face PAM path and virtual FIDO enumeration. The existing vault,
+non-empty vault, TPM-sealed key, active service, and virtual FIDO enumeration;
+it never runs `--tpm-init`, rewrites the vault/key, or registers credentials.
+Then run `irauthctl passkey test` to check the face PAM path and repeat the
+virtual FIDO enumeration check. The existing vault,
 TPM key and registered GitHub credential must remain intact.
 On a clean machine, `irauthctl passkey install` can build the pinned transport
 instead.

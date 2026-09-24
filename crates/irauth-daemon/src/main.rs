@@ -5,7 +5,7 @@ use irauth_core::{
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
@@ -19,6 +19,9 @@ use std::time::{Duration, Instant};
 const SOL_SOCKET: c_int = 1;
 const SO_PEERCRED: c_int = 17;
 const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
+const REQUEST_WORKERS: usize = 4;
+const REQUEST_QUEUE: usize = 16;
+const MAX_REQUEST_BYTES: u64 = 1024;
 
 #[repr(C)]
 struct UCred {
@@ -69,17 +72,42 @@ fn run() -> io::Result<()> {
         rate_limit: Mutex::new(HashMap::new()),
     });
 
-    eprintln!("irauthd: listening on {SOCKET_PATH}");
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let state = Arc::clone(&state);
-                thread::spawn(move || {
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<UnixStream>(REQUEST_QUEUE);
+    let receiver = Arc::new(Mutex::new(receiver));
+    for _ in 0..REQUEST_WORKERS {
+        let receiver = Arc::clone(&receiver);
+        let state = Arc::clone(&state);
+        thread::spawn(move || loop {
+            let stream = match receiver.lock() {
+                Ok(receiver) => receiver.recv(),
+                Err(_) => return,
+            };
+            match stream {
+                Ok(stream) => {
                     if let Err(err) = handle(stream, &state) {
                         eprintln!("irauthd: request failed: {err}");
                     }
-                });
+                }
+                Err(_) => return,
             }
+        });
+    }
+
+    eprintln!("irauthd: listening on {SOCKET_PATH}");
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => match sender.try_send(stream) {
+                Ok(()) => {}
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    eprintln!("irauthd: request queue full; dropping connection");
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "request workers stopped",
+                    ));
+                }
+            },
             Err(err) => eprintln!("irauthd: accept failed: {err}"),
         }
     }
@@ -91,12 +119,22 @@ fn handle(mut stream: UnixStream, state: &State) -> io::Result<()> {
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     let cred = peer_cred(&stream)?;
     let mut line = String::new();
-    BufReader::new(stream.try_clone()?).read_line(&mut line)?;
-    let response = match decode_request(&line) {
-        Ok(Request::Ping) => Response::Pong,
-        Ok(Request::Status) => Response::Status(status(&state.backend)),
-        Ok(Request::Authenticate { user, reason }) => authenticate(cred.uid, &user, &reason, state),
-        Err(err) => Response::Error(format!("protocol: {err}")),
+    BufReader::new(stream.try_clone()?)
+        .take(MAX_REQUEST_BYTES)
+        .read_line(&mut line)?;
+    let response = if !line.ends_with('\n') {
+        Response::Error(
+            "protocol: request must be newline-terminated and at most 1024 bytes".into(),
+        )
+    } else {
+        match decode_request(&line) {
+            Ok(Request::Ping) => Response::Pong,
+            Ok(Request::Status) => Response::Status(status(&state.backend)),
+            Ok(Request::Authenticate { user, reason }) => {
+                authenticate(cred.uid, &user, &reason, state)
+            }
+            Err(err) => Response::Error(format!("protocol: {err}")),
+        }
     };
     stream.write_all(encode_response(&response).as_bytes())?;
     Ok(())
@@ -106,7 +144,7 @@ fn authenticate(peer_uid: u32, user: &str, reason: &str, state: &State) -> Respo
     let Some(target_uid) = uid_for_user(user) else {
         return Response::Error("unknown user".into());
     };
-    if peer_uid != 0 && peer_uid != target_uid {
+    if !may_authenticate(peer_uid, target_uid) {
         return Response::Error("peer may authenticate only itself".into());
     }
     if !rate_limit(peer_uid, &state.rate_limit) {
@@ -189,6 +227,10 @@ fn status(backend: &Backend) -> DaemonStatus {
             .unwrap_or(0),
         tpm_present: Path::new("/dev/tpmrm0").exists(),
     }
+}
+
+fn may_authenticate(peer_uid: u32, target_uid: u32) -> bool {
+    peer_uid == 0 || peer_uid == target_uid
 }
 
 fn rate_limit(uid: u32, map: &Mutex<HashMap<u32, Instant>>) -> bool {
@@ -277,4 +319,24 @@ fn secure_socket(path: &Path) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_root_peer_cannot_request_authentication_for_another_user() {
+        assert!(may_authenticate(1000, 1000));
+        assert!(!may_authenticate(1000, 1001));
+        assert!(may_authenticate(0, 1001));
+    }
+
+    #[test]
+    fn rate_limit_is_per_peer_uid() {
+        let map = Mutex::new(HashMap::new());
+        assert!(rate_limit(1000, &map));
+        assert!(!rate_limit(1000, &map));
+        assert!(rate_limit(1001, &map));
+    }
 }

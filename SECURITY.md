@@ -23,7 +23,9 @@ method configured.
    request face verification for its own UID; root PAM consumers may request the
    PAM-selected account.
 5. **Serialized camera access.** Face checks are serialized to avoid races and
-   accidental cross-talk on integrated cameras.
+   accidental cross-talk on integrated cameras. The daemon also caps IPC lines
+   at 1024 bytes and uses four workers with a bounded queue, dropping excess
+   connections rather than spawning unbounded threads.
 6. **Hardware-bound passkeys.** `irauthctl passkey adopt` and `passkey install`
    require TPM 2.0. The pinned v0.1 FIDO2 transport seals its vault key to the
    TPM and uses TPM-generated credential keys. IRAuth intentionally does not
@@ -33,7 +35,8 @@ method configured.
 
 The PAM module is intentionally small: it gets the PAM user, sends a local
 request, and maps only an explicit `OK` response to `PAM_SUCCESS`. Recognition,
-hardware policy and process execution stay out of the PAM consumer.
+hardware policy and process execution stay out of the PAM consumer. PAM's
+`reason=` field is diagnostic/log metadata only; it does not alter authorization.
 
 `irauthd` runs as root because login managers and PAM consumers must be able to
 authenticate users before a user session exists. Its systemd unit uses a

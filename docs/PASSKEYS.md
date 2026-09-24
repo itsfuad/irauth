@@ -23,8 +23,12 @@ irauthctl passkey adopt
 ```
 
 This creates/enables `irauth-passkey.service`, disables the old competing user
-service, and leaves the binary, vault, sealed key and existing WebAuthn
-credentials untouched. No Go compiler is used by the adopt path.
+service, and verifies that the user-owned bridge binary, private non-empty
+`vault.json`, private TPM-sealed key, running service, and virtual FIDO device
+are present. The adoption path leaves the binary, vault, sealed key and existing
+WebAuthn credentials untouched. No Go compiler is used by the adopt path.
+Run `irauthctl passkey test` afterward to verify the face PAM path; the real
+WebAuthn assertion still requires a browser ceremony.
 
 ## Clean installation
 
