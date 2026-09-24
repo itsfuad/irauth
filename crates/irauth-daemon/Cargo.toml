@@ -1,0 +1,17 @@
+[package]
+name = "irauth-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "irauthd"
+path = "src/main.rs"
+
+[dependencies]
+irauth-core = { path = "../irauth-core" }
+irauth-hardware = { path = "../irauth-hardware" }
+irauth-backend-howdy = { path = "../irauth-backend-howdy" }

@@ -1,0 +1,4 @@
+#%PAM-1.0
+# IRAuth face-only PAM service used by the user-session FIDO2 bridge.
+auth sufficient pam_irauth.so reason=passkey
+auth required pam_deny.so
