@@ -362,9 +362,8 @@ fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if Path::new("/etc/pam.d/polkit-1").exists() {
         selected_services.push("polkit-1");
     }
-    if Path::new("/etc/pam.d/howdy-only").exists() {
-        selected_services.push("howdy-only");
-    }
+    // `howdy-only` was an upstream bridge compatibility service. IRAuth-managed
+    // passkeys now call irauth-passkey directly; leave this legacy service alone.
     if with_login && Path::new("/etc/pam.d/gdm-password").exists() {
         selected_services.push("gdm-password");
     }
@@ -408,6 +407,8 @@ struct PamFileSnapshot {
 }
 
 struct PamSnapshot {
+    pam_dir: PathBuf,
+    manifest_path: PathBuf,
     files: Vec<PamFileSnapshot>,
     migrated_manifest: Option<PamFileSnapshot>,
 }
@@ -421,15 +422,24 @@ fn snapshot_file(path: &Path) -> Result<PamFileSnapshot, Box<dyn std::error::Err
 }
 
 fn snapshot_pam_state() -> Result<PamSnapshot, Box<dyn std::error::Error>> {
+    snapshot_pam_state_in(
+        Path::new("/etc/pam.d"),
+        Path::new("/etc/irauth/pam-migrated.list"),
+    )
+}
+
+fn snapshot_pam_state_in(
+    pam_dir: &Path,
+    manifest_path: &Path,
+) -> Result<PamSnapshot, Box<dyn std::error::Error>> {
     let mut files = Vec::new();
-    for entry in fs::read_dir("/etc/pam.d")? {
+    for entry in fs::read_dir(pam_dir)? {
         let entry = entry?;
         if entry.file_type()?.is_file() {
             files.push(snapshot_file(&entry.path())?);
         }
     }
 
-    let manifest_path = Path::new("/etc/irauth/pam-migrated.list");
     let migrated_manifest = if manifest_path.is_file() {
         Some(snapshot_file(manifest_path)?)
     } else {
@@ -437,6 +447,8 @@ fn snapshot_pam_state() -> Result<PamSnapshot, Box<dyn std::error::Error>> {
     };
 
     Ok(PamSnapshot {
+        pam_dir: pam_dir.to_path_buf(),
+        manifest_path: manifest_path.to_path_buf(),
         files,
         migrated_manifest,
     })
@@ -453,14 +465,17 @@ fn restore_pam_state(snapshot: &PamSnapshot) -> Result<(), Box<dyn std::error::E
 
     // Remove transaction artifacts that did not exist before setup. Existing
     // IRAuth backups are part of the snapshot and are preserved.
-    if let Ok(entries) = fs::read_dir("/etc/pam.d") {
+    if let Ok(entries) = fs::read_dir(&snapshot.pam_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             let existed_before = snapshot.files.iter().any(|file| file.path == path);
             let is_transaction_artifact = path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(".irauth.bak") || name.ends_with(".irauth.tmp"));
+                .is_some_and(|name| {
+                    name.ends_with(".irauth.bak")
+                        || (name.contains(".irauth.") && name.ends_with(".tmp"))
+                });
             if !existed_before && is_transaction_artifact {
                 if let Err(err) = fs::remove_file(&path) {
                     failures.push(format!("{}: {err}", path.display()));
@@ -469,7 +484,7 @@ fn restore_pam_state(snapshot: &PamSnapshot) -> Result<(), Box<dyn std::error::E
         }
     }
 
-    let manifest_path = Path::new("/etc/irauth/pam-migrated.list");
+    let manifest_path = &snapshot.manifest_path;
     match &snapshot.migrated_manifest {
         Some(file) => {
             if let Err(err) = atomic_write(&file.path, &file.content, file.mode) {
@@ -530,15 +545,14 @@ fn cmd_pam(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 fn pam_enable(service: &str) -> Result<(), Box<dyn std::error::Error>> {
     validate_service_name(service)?;
     let path = PathBuf::from("/etc/pam.d").join(service);
+    require_regular_file(&path)?;
     let content = fs::read_to_string(&path)?;
     if content.lines().any(|l| l.contains("pam_irauth.so")) {
         println!("  PAM {service}: already enabled");
         return Ok(());
     }
     let backup = pam_backup_path(&path);
-    if !backup.exists() {
-        fs::copy(&path, &backup)?;
-    }
+    create_backup_once(&path, &backup)?;
     let stanza = "# IRAuth begin\nauth sufficient pam_irauth.so reason=system\n# IRAuth end\n";
     let mut out = String::new();
     let mut inserted = false;
@@ -553,7 +567,8 @@ fn pam_enable(service: &str) -> Result<(), Box<dyn std::error::Error>> {
     if !inserted {
         out = format!("{stanza}{out}");
     }
-    atomic_write(&path, out.as_bytes(), 0o644)?;
+    let mode = fs::metadata(&path)?.permissions().mode() & 0o7777;
+    atomic_write(&path, out.as_bytes(), mode)?;
     println!("  PAM {service}: enabled (backup {})", backup.display());
     Ok(())
 }
@@ -561,9 +576,12 @@ fn pam_enable(service: &str) -> Result<(), Box<dyn std::error::Error>> {
 fn pam_disable(service: &str) -> Result<(), Box<dyn std::error::Error>> {
     validate_service_name(service)?;
     let path = PathBuf::from("/etc/pam.d").join(service);
+    require_regular_file(&path)?;
     let backup = pam_backup_path(&path);
-    if backup.is_file() {
-        fs::copy(&backup, &path)?;
+    if backup.exists() || fs::symlink_metadata(&backup).is_ok() {
+        require_regular_file(&backup)?;
+        let mode = fs::metadata(&backup)?.permissions().mode() & 0o7777;
+        atomic_write(&path, &fs::read(&backup)?, mode)?;
         println!("  PAM {service}: restored {}", backup.display());
         return Ok(());
     }
@@ -584,7 +602,8 @@ fn pam_disable(service: &str) -> Result<(), Box<dyn std::error::Error>> {
             out.push('\n');
         }
     }
-    atomic_write(&path, out.as_bytes(), 0o644)?;
+    let mode = fs::metadata(&path)?.permissions().mode() & 0o7777;
+    atomic_write(&path, out.as_bytes(), mode)?;
     Ok(())
 }
 
@@ -602,8 +621,15 @@ fn install_howdy_only_pam() -> Result<(), Box<dyn std::error::Error>> {
 fn migrate_direct_howdy_pam(
     selected_services: &[&str],
 ) -> Result<usize, Box<dyn std::error::Error>> {
+    migrate_direct_howdy_pam_in(Path::new("/etc/pam.d"), selected_services)
+}
+
+fn migrate_direct_howdy_pam_in(
+    pam_dir: &Path,
+    selected_services: &[&str],
+) -> Result<usize, Box<dyn std::error::Error>> {
     let mut migrated = Vec::<PathBuf>::new();
-    for entry in fs::read_dir("/etc/pam.d")? {
+    for entry in fs::read_dir(pam_dir)? {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
             continue;
@@ -613,63 +639,75 @@ fn migrate_direct_howdy_pam(
         if name.starts_with("irauth-") || name.ends_with(".irauth.bak") {
             continue;
         }
-        if !selected_services.contains(&name) {
+        if !selected_services.contains(&name) || !entry.file_type()?.is_file() {
             continue;
         }
         let content = match fs::read_to_string(&path) {
             Ok(c) => c,
             Err(_) => continue,
         };
-        let mut found = false;
-        let mut inserted = false;
-        let mut out = String::new();
-        for line in content.lines() {
-            let t = line.trim();
-            let lower = t.to_ascii_lowercase();
-            let direct_howdy =
-                !t.starts_with('#') && t.starts_with("auth ") && lower.contains("howdy");
-            if direct_howdy {
-                found = true;
-                out.push_str(
-                    "# IRAuth disabled direct Howdy PAM entry to enforce strict camera policy:\n# ",
-                );
-                out.push_str(line);
-                out.push('\n');
-                if !inserted {
-                    out.push_str("auth sufficient pam_irauth.so reason=system\n");
-                    inserted = true;
-                }
-            } else {
-                out.push_str(line);
-                out.push('\n');
-            }
-        }
+        let (out, found) = rewrite_direct_howdy_pam(&content);
         if !found {
             continue;
         }
         let backup = pam_backup_path(&path);
-        if !backup.exists() {
-            fs::copy(&path, &backup)?;
-        }
-        atomic_write(&path, out.as_bytes(), 0o644)?;
+        create_backup_once(&path, &backup)?;
+        let mode = fs::metadata(&path)?.permissions().mode() & 0o7777;
+        atomic_write(&path, out.as_bytes(), mode)?;
         migrated.push(path);
     }
-    refresh_migration_manifest()?;
+    refresh_migration_manifest_in(
+        pam_dir,
+        &pam_dir
+            .parent()
+            .unwrap_or(pam_dir)
+            .join("irauth/pam-migrated.list"),
+    )?;
     Ok(migrated.len())
 }
 
-fn refresh_migration_manifest() -> Result<(), Box<dyn std::error::Error>> {
+fn rewrite_direct_howdy_pam(content: &str) -> (String, bool) {
+    let mut found = false;
+    let mut inserted = false;
+    let mut out = String::new();
+    for line in content.lines() {
+        let t = line.trim();
+        let lower = t.to_ascii_lowercase();
+        let direct_howdy = !t.starts_with('#') && t.starts_with("auth ") && lower.contains("howdy");
+        if direct_howdy {
+            found = true;
+            out.push_str(
+                "# IRAuth disabled direct Howdy PAM entry to enforce strict camera policy:\n# ",
+            );
+            out.push_str(line);
+            out.push('\n');
+            if !inserted {
+                out.push_str("auth sufficient pam_irauth.so reason=system\n");
+                inserted = true;
+            }
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    (out, found)
+}
+
+fn refresh_migration_manifest_in(
+    pam_dir: &Path,
+    manifest_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let marker = "# IRAuth disabled direct Howdy PAM entry to enforce strict camera policy:";
     let mut migrated = Vec::<PathBuf>::new();
 
-    for entry in fs::read_dir("/etc/pam.d")? {
+    for entry in fs::read_dir(pam_dir)? {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
             continue;
         }
         let path = entry.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name.ends_with(".irauth.bak") || name.ends_with(".irauth.tmp") {
+        if name.ends_with(".irauth.bak") || (name.contains(".irauth.") && name.ends_with(".tmp")) {
             continue;
         }
         if fs::read_to_string(&path)
@@ -681,7 +719,6 @@ fn refresh_migration_manifest() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     migrated.sort();
-    let manifest_path = Path::new("/etc/irauth/pam-migrated.list");
     if migrated.is_empty() {
         if manifest_path.exists() {
             fs::remove_file(manifest_path)?;
@@ -689,7 +726,9 @@ fn refresh_migration_manifest() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    fs::create_dir_all("/etc/irauth")?;
+    if let Some(parent) = manifest_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let mut manifest = String::new();
     for path in migrated {
         manifest.push_str(&path.to_string_lossy());
@@ -830,21 +869,39 @@ fn apply_vhci_permissions() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn wait_for_daemon_ready() -> Result<(), Box<dyn std::error::Error>> {
-    let mut last_error = String::from("daemon socket was not ready");
-    for _ in 0..50 {
-        match daemon_request(Request::Ping) {
-            Ok(response) if response.starts_with("PONG") => return Ok(()),
-            Ok(response) => {
-                last_error = format!("unexpected daemon response: {}", response.trim());
-            }
-            Err(err) => {
-                last_error = err.to_string();
-            }
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    wait_for_daemon_ready_with(
+        || daemon_request(Request::Ping),
+        Duration::from_secs(5),
+        Duration::from_millis(100),
+    )
+}
 
-    Err(format!("irauthd did not become ready within 5 seconds: {last_error}").into())
+fn wait_for_daemon_ready_with<F>(
+    mut probe: F,
+    timeout: Duration,
+    interval: Duration,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: FnMut() -> io::Result<String>,
+{
+    let started = std::time::Instant::now();
+    let last_error = loop {
+        let error = match probe() {
+            Ok(response) if response.starts_with("PONG") => return Ok(()),
+            Ok(response) => format!("unexpected daemon response: {}", response.trim()),
+            Err(err) => err.to_string(),
+        };
+        if started.elapsed() >= timeout {
+            break error;
+        }
+        std::thread::sleep(interval.min(timeout.saturating_sub(started.elapsed())));
+    };
+
+    Err(format!(
+        "irauthd did not become ready within {:.1} seconds: {last_error}",
+        timeout.as_secs_f32()
+    )
+    .into())
 }
 
 fn daemon_request(req: Request) -> io::Result<String> {
@@ -879,6 +936,43 @@ fn validate_user(user: &str) -> Result<&str, Box<dyn std::error::Error>> {
         return Err("invalid user name".into());
     }
     Ok(user)
+}
+
+fn create_backup_once(source: &Path, backup: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    require_regular_file(source)?;
+    let metadata = fs::metadata(source)?;
+    let mut target = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(metadata.permissions().mode() & 0o7777)
+        .open(backup)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            require_regular_file(backup)?;
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let result = (|| -> io::Result<()> {
+        target.write_all(&fs::read(source)?)?;
+        target.sync_all()?;
+        fs::set_permissions(backup, metadata.permissions())?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(backup);
+    }
+    result?;
+    Ok(())
+}
+
+fn require_regular_file(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if !fs::symlink_metadata(path)?.file_type().is_file() {
+        return Err(format!("refusing non-regular PAM path: {}", path.display()).into());
+    }
+    Ok(())
 }
 
 fn pam_backup_path(path: &Path) -> PathBuf {
@@ -925,11 +1019,179 @@ fn run_ok(cmd: &mut Command, what: &str) -> Result<(), Box<dyn std::error::Error
 }
 
 fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Box<dyn std::error::Error>> {
-    let tmp = path.with_extension("irauth.tmp");
-    fs::write(&tmp, bytes)?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
-    fs::rename(tmp, path)?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = path.with_extension(format!("irauth.{}.tmp", std::process::id()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&tmp)?;
+    let result = (|| -> io::Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+        fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path =
+                env::temp_dir().join(format!("irauthctl-test-{}-{nonce}", std::process::id()));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn setup_test_tree() -> (TempDir, PathBuf, PathBuf) {
+        let root = TempDir::new();
+        let pam = root.0.join("pam.d");
+        let manifest = root.0.join("irauth/pam-migrated.list");
+        fs::create_dir_all(&pam).unwrap();
+        (root, pam, manifest)
+    }
+
+    #[test]
+    fn migration_only_changes_selected_services_and_leaves_unselected_login_stack_untouched() {
+        let (_root, pam, manifest) = setup_test_tree();
+        let sudo = b"#%PAM-1.0\nauth sufficient pam_howdy.so\nauth include system-auth\n";
+        let unrelated = b"#%PAM-1.0\nauth required pam_unix.so\n";
+        let gdm = b"#%PAM-1.0\nauth sufficient pam_howdy.so\nauth substack password-auth\n";
+        fs::write(pam.join("sudo"), sudo).unwrap();
+        fs::write(pam.join("other"), unrelated).unwrap();
+        fs::write(pam.join("gdm-password"), gdm).unwrap();
+
+        assert_eq!(migrate_direct_howdy_pam_in(&pam, &["sudo"]).unwrap(), 1);
+        assert_eq!(fs::read(pam.join("other")).unwrap(), unrelated);
+        assert_eq!(fs::read(pam.join("gdm-password")).unwrap(), gdm);
+        let migrated = fs::read_to_string(pam.join("sudo")).unwrap();
+        assert!(migrated.contains("# auth sufficient pam_howdy.so"));
+        assert_eq!(migrated.matches("pam_irauth.so").count(), 1);
+        assert_eq!(
+            fs::read_to_string(&manifest).unwrap(),
+            format!("{}\n", pam.join("sudo").display())
+        );
+    }
+
+    #[test]
+    fn migration_is_idempotent_and_never_overwrites_existing_backup() {
+        let (_root, pam, manifest) = setup_test_tree();
+        let service = pam.join("sudo");
+        let backup = pam_backup_path(&service);
+        fs::write(&service, "#%PAM-1.0\nauth sufficient pam_howdy.so\n").unwrap();
+        fs::write(&backup, b"preserve backup").unwrap();
+        assert_eq!(migrate_direct_howdy_pam_in(&pam, &["sudo"]).unwrap(), 1);
+        let first = fs::read(&service).unwrap();
+        assert_eq!(migrate_direct_howdy_pam_in(&pam, &["sudo"]).unwrap(), 0);
+        assert_eq!(fs::read(&service).unwrap(), first);
+        assert_eq!(fs::read(backup).unwrap(), b"preserve backup");
+        assert_eq!(fs::read_to_string(manifest).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn empty_migration_removes_stale_manifest() {
+        let (_root, pam, manifest) = setup_test_tree();
+        fs::write(pam.join("sudo"), "#%PAM-1.0\nauth required pam_unix.so\n").unwrap();
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(&manifest, "/stale\n").unwrap();
+        migrate_direct_howdy_pam_in(&pam, &["sudo"]).unwrap();
+        assert!(!manifest.exists());
+    }
+
+    #[test]
+    fn rollback_restores_content_mode_manifest_and_removes_new_artifacts() {
+        let (_root, pam, manifest) = setup_test_tree();
+        let service = pam.join("sudo");
+        fs::write(&service, "original\n").unwrap();
+        fs::set_permissions(&service, fs::Permissions::from_mode(0o640)).unwrap();
+        let snapshot = snapshot_pam_state_in(&pam, &manifest).unwrap();
+        fs::write(&service, "changed\n").unwrap();
+        fs::write(pam.join("sudo.irauth.bak"), "new backup").unwrap();
+        fs::write(pam.join("sudo.irauth.123.tmp"), "new temp").unwrap();
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(&manifest, "new manifest\n").unwrap();
+        restore_pam_state(&snapshot).unwrap();
+        assert_eq!(fs::read(&service).unwrap(), b"original\n");
+        assert_eq!(
+            fs::metadata(service).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert!(!pam.join("sudo.irauth.bak").exists());
+        assert!(!pam.join("sudo.irauth.123.tmp").exists());
+        assert!(!manifest.exists());
+    }
+
+    #[test]
+    fn rollback_preserves_preexisting_transaction_artifacts_and_restores_manifest() {
+        let (_root, pam, manifest) = setup_test_tree();
+        let service = pam.join("sudo");
+        let old_backup = pam.join("sudo.irauth.bak");
+        fs::write(&service, "original\n").unwrap();
+        fs::write(&old_backup, "old backup").unwrap();
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(&manifest, "old manifest\n").unwrap();
+        let snapshot = snapshot_pam_state_in(&pam, &manifest).unwrap();
+        fs::write(&service, "changed\n").unwrap();
+        fs::write(&old_backup, "changed backup").unwrap();
+        fs::write(&manifest, "new manifest\n").unwrap();
+        restore_pam_state(&snapshot).unwrap();
+        assert_eq!(fs::read(old_backup).unwrap(), b"old backup");
+        assert_eq!(fs::read_to_string(manifest).unwrap(), "old manifest\n");
+    }
+
+    #[test]
+    fn readiness_retries_connection_errors_until_pong_and_reports_last_error() {
+        let mut attempts = 0;
+        wait_for_daemon_ready_with(
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(io::Error::new(
+                        io::ErrorKind::ConnectionRefused,
+                        "not listening",
+                    ))
+                } else {
+                    Ok("PONG\\n".into())
+                }
+            },
+            Duration::from_millis(50),
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        assert_eq!(attempts, 3);
+
+        let err = wait_for_daemon_ready_with(
+            || Err(io::Error::new(io::ErrorKind::NotFound, "socket missing")),
+            Duration::from_millis(2),
+            Duration::from_millis(1),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("within 0.0 seconds"));
+        assert!(err.contains("socket missing"));
+    }
 }
 
 #[allow(dead_code)]

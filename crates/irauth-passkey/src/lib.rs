@@ -43,7 +43,9 @@ pub fn diagnose() -> Diagnosis {
         };
     };
     let binary = home.join(".local/bin/howdy-bridge");
-    let sealed = home.join(".config/howdy-passkey-bridge/vault.key.tpm");
+    let config = home.join(".config/howdy-passkey-bridge");
+    let vault = config.join("vault.json");
+    let sealed = config.join("vault.key.tpm");
     let unit = home.join(".config/systemd/user").join(SERVICE_NAME);
     let active = Command::new("systemctl")
         .args(["--user", "is-active", "--quiet", SERVICE_NAME])
@@ -53,6 +55,9 @@ pub fn diagnose() -> Diagnosis {
     let mut missing = Vec::new();
     if !binary.is_file() {
         missing.push("bridge binary");
+    }
+    if !vault.is_file() || fs::metadata(&vault).map(|m| m.len() == 0).unwrap_or(true) {
+        missing.push("existing vault.json");
     }
     if !sealed.is_file() {
         missing.push("TPM-sealed vault key");
@@ -139,6 +144,10 @@ fn adopt() -> Result<(), Box<dyn std::error::Error>> {
     if !binary.is_file() {
         return Err(format!("existing bridge binary not found at {}; use `irauthctl passkey install` for a fresh setup", binary.display()).into());
     }
+    let vault = config.join("vault.json");
+    if !vault.is_file() || fs::metadata(&vault)?.len() == 0 {
+        return Err(format!("existing passkey vault not found or empty at {}; IRAuth will not initialize or replace it", vault.display()).into());
+    }
     let sealed = config.join("vault.key.tpm");
     if !sealed.is_file() {
         return Err(format!(
@@ -148,8 +157,17 @@ fn adopt() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     configure_service(&binary, &config)?;
+    let diagnosis = diagnose();
+    if !diagnosis.ready {
+        return Err(format!(
+            "passkey service wiring completed, but verification failed: {}",
+            diagnosis.detail
+        )
+        .into());
+    }
+    println!("Adopted the existing TPM-backed passkey bridge; vault.json, vault.key.tpm and registered credentials were not modified.");
     println!(
-        "Adopted the existing TPM-backed passkey bridge; existing credentials were left untouched."
+        "Run `irauthctl passkey test` to verify face PAM and virtual FIDO device enumeration."
     );
     Ok(())
 }

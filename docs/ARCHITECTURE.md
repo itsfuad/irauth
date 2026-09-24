@@ -43,10 +43,23 @@ causes IRAuth authentication to fail closed.
 
 ## PAM migration
 
-IRAuth first captures the existing Howdy PAM module line for its private
-`irauth-howdy` backend service. Setup then backs up other active direct Howdy
-entries and replaces those entry points with `pam_irauth.so`. This matters for
-the no-RGB-downgrade invariant: leaving a legacy direct Howdy hook later in a
-PAM stack would let that hook authenticate independently of `irauthd`'s hardware
-check. The migration manifest and per-service backups are restored by the
-uninstaller.
+IRAuth captures the existing Howdy PAM module line for its private
+`irauth-howdy` backend service, then validates face recognition through that
+isolated service before touching system PAM. Setup migrates selected active
+Howdy lines in `sudo` and `polkit-1`; it includes `gdm-password` only with
+`--with-login`. Each direct Howdy auth line is commented and replaced by one
+`sufficient pam_irauth.so` check at that position, so a face failure continues
+to the existing password stack. Changes are snapshotted as a transaction and
+restored on failure.
+
+`howdy-only` is a legacy Howdy-as-passkey compatibility service. IRAuth-managed
+passkeys use `/etc/pam.d/irauth-passkey`, so new setup leaves `howdy-only`
+untouched. Existing migrated versions remain in the migration manifest and
+retain their `.irauth.bak` restoration path; uninstall restores those files.
+
+GDM has distro-specific PAM ordering. On the reviewed Fedora stack in this
+environment, `pam_selinux_permit.so` precedes a direct `pam_howdy.so` sufficient
+line, followed by `substack password-auth`. Therefore the planned opt-in is to
+replace that direct Howdy line in place with `pam_irauth.so sufficient`, leaving
+`password-auth` intact. The installer does not edit GDM by default; operators
+must re-inspect the target machine's stack and keep a tested root recovery path.

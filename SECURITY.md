@@ -11,8 +11,10 @@ method configured.
    `/etc/irauth/hardware.ids`. Setup binds Howdy to that accepted node, and
    `irauthd` re-checks Howdy's exact `device_path` before every authentication.
    A later switch to an RGB webcam therefore fails closed. During setup, active
-   direct Howdy PAM entries are backed up and routed through `pam_irauth.so`;
-   otherwise those legacy entries could bypass IRAuth's hardware policy.
+   direct Howdy PAM entries in selected services are backed up and routed through
+   `pam_irauth.so`; otherwise those hooks could bypass IRAuth's hardware policy.
+   New setup selects sudo/polkit and only selects GDM with explicit `--with-login`.
+   The legacy `howdy-only` compatibility service is no longer automatically changed.
 2. **Fresh verification.** `pam_irauth.so` does not cache success. Every PAM or
    WebAuthn ceremony asks `irauthd`, which invokes the face backend again.
 3. **Fail closed.** Missing daemon, malformed IPC, Howdy failure, missing models,
@@ -55,10 +57,26 @@ than using `setenforce 0` or broad `audit2allow` output.
 
 ## Recovery
 
-PAM edits are inserted as `sufficient`, so failure falls through to the
-existing password stack. Before modifying a PAM service IRAuth creates
-`/etc/pam.d/<service>.irauth.bak`. `irauthctl pam disable SERVICE` restores it.
-The uninstall script also attempts restoration.
+IRAuth inserts or substitutes an `auth sufficient` check so a failed or
+unavailable face check falls through to the existing password stack. Before
+modifying a PAM service it creates `/etc/pam.d/<service>.irauth.bak` without
+overwriting an existing backup. `irauthctl pam disable SERVICE` restores it.
+Setup snapshots selected PAM files and the migration manifest and rolls them
+back if any enablement step fails. Uninstall restores enabled and migrated
+stacks. GDM remains opt-in; inspect its local PAM ordering and verify sudo/root
+recovery before enabling login integration.
 
-For passkeys, keep the upstream pre-TPM vault backup if one was created during
-migration. Clearing/replacing the TPM can make TPM-bound credentials unusable.
+Passkey adoption only rewires the user service: it does not run `--tpm-init`,
+change `vault.json` or `vault.key.tpm`, or register credentials. Uninstall keeps
+both user files by default. Clearing/replacing the TPM can make TPM-bound
+credentials unusable.
+
+## Limitations and threat model
+
+Howdy supplies the v0.1 recognition and liveness behavior. IR/depth device
+selection is a strict hardware gate, not proof that the camera path is secure,
+that frames cannot be spoofed, or that the biometric model is protected like a
+platform credential. IRAuth is Windows-Hello-style in the user experience only;
+it is not Windows Hello, does not claim hardware-level equivalence, and has not
+received an independent security audit. Password authentication should remain
+enabled with independent recovery factors.
