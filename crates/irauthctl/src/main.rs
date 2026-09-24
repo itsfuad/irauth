@@ -1,6 +1,6 @@
-use irauth_backend_howdy::{repair_dlib_assets, Backend};
+use irauth_backend_howdy::{bind_camera, configured_camera, repair_dlib_assets, Backend};
 use irauth_core::{encode_request, Request, SOCKET_PATH};
-use irauth_hardware::{probe, strict_devices, Evidence, VERIFIED_IDS_PATH};
+use irauth_hardware::{is_strict_device_path, probe, strict_devices, Evidence, VERIFIED_IDS_PATH};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
@@ -44,10 +44,10 @@ Usage:
   irauthctl doctor
   irauthctl enroll [USER]
   irauthctl test [USER]
-  sudo irauthctl setup [--user USER] [--with-login] [--allow-no-tpm]
+  sudo irauthctl setup [--user USER] [--camera PATH] [--with-login] [--allow-no-tpm]
   sudo irauthctl pam enable SERVICE
   sudo irauthctl pam disable SERVICE
-  irauthctl passkey install|start|stop|status|test
+  irauthctl passkey adopt|install|start|stop|status|test
 "#);
 }
 
@@ -108,6 +108,12 @@ fn cmd_doctor() -> Result<(), Box<dyn std::error::Error>> {
     check("Howdy command", backend.howdy, "howdy", &mut failed);
     check("pamtester", backend.pamtester, "pamtester", &mut failed);
     check("dlib models", backend.missing_models.is_empty(), &if backend.missing_models.is_empty() { "ready".into() } else { backend.missing_models.join(", ") }, &mut failed);
+    let camera = configured_camera()?;
+    let (camera_ok, camera_detail) = match camera {
+        Some(ref c) => (is_strict_device_path(&c.device_path)?, format!("{} ({})", c.device_path.display(), c.config_path.display())),
+        None => (false, "Howdy device_path is missing/none".into()),
+    };
+    check("Howdy IR binding", camera_ok, &camera_detail, &mut failed);
     check("IRAuth PAM module", pam_module_path().is_some(), "pam_irauth.so", &mut failed);
     check("Howdy-only PAM", Path::new("/etc/pam.d/irauth-howdy").is_file(), "/etc/pam.d/irauth-howdy", &mut failed);
     check("Passkey PAM", Path::new("/etc/pam.d/irauth-passkey").is_file(), "/etc/pam.d/irauth-passkey", &mut failed);
@@ -133,6 +139,7 @@ fn check(name: &str, ok: bool, detail: &str, failed: &mut usize) {
 fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     require_root()?;
     let mut user: Option<String> = None;
+    let mut camera: Option<PathBuf> = None;
     let mut with_login = false;
     let mut allow_no_tpm = false;
     let mut i = 0;
@@ -142,6 +149,11 @@ fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 i += 1;
                 user = args.get(i).cloned();
                 if user.is_none() { return Err("--user requires a value".into()); }
+            }
+            "--camera" => {
+                i += 1;
+                camera = args.get(i).map(PathBuf::from);
+                if camera.is_none() { return Err("--camera requires an absolute V4L2 path".into()); }
             }
             "--with-login" => with_login = true,
             "--allow-no-tpm" => allow_no_tpm = true,
@@ -157,6 +169,9 @@ fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("no strict IR/depth camera detected; add a verified VID:PID to {VERIFIED_IDS_PATH} only after confirming the hardware is truly IR/depth").into());
     }
     for d in &strict { println!("  hardware: {} ({})", d.node.display(), d.name); }
+
+    let selected_camera = select_camera(camera.as_deref(), &strict)?;
+    println!("  selected IR camera: {}", selected_camera.display());
 
     if !Path::new("/dev/tpmrm0").exists() && !allow_no_tpm {
         return Err("TPM 2.0 is required by strict setup; use --allow-no-tpm only for PAM-only evaluation (passkeys stay disabled)".into());
@@ -175,6 +190,14 @@ fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         pf = backend.preflight();
     }
     if !pf.missing_models.is_empty() { return Err("Howdy dlib model repair did not complete".into()); }
+
+    if configured_camera()?.as_ref().map(|c| c.device_path.as_path()) != Some(selected_camera.as_path()) {
+        let config = bind_camera(&selected_camera)?;
+        println!("  Howdy camera bound in {}", config.display());
+    }
+    if !is_strict_device_path(&selected_camera)? {
+        return Err("selected camera stopped satisfying the strict IR/depth policy".into());
+    }
 
     ensure_group("irauth")?;
     ensure_group("usbip")?;
@@ -200,8 +223,27 @@ fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\nSystem authentication is configured.");
     println!("IMPORTANT: log out completely and log back in once so irauth/usbip/tss group membership reaches your user session.");
-    println!("After login run: irauthctl passkey install && irauthctl doctor");
+    println!("After login run: irauthctl passkey adopt (if you already use howdy-as-passkey) or irauthctl passkey install, then irauthctl doctor");
     Ok(())
+}
+
+fn select_camera(explicit: Option<&Path>, strict: &[irauth_hardware::VideoDevice]) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Some(path) = explicit {
+        if !path.is_absolute() { return Err("--camera must be an absolute path".into()); }
+        if !is_strict_device_path(path)? {
+            return Err(format!("{} is not a strict IR/depth camera", path.display()).into());
+        }
+        return Ok(path.to_path_buf());
+    }
+    if let Some(current) = configured_camera()? {
+        if is_strict_device_path(&current.device_path)? {
+            return Ok(current.device_path);
+        }
+    }
+    if strict.len() == 1 {
+        return Ok(strict[0].node.clone());
+    }
+    Err("multiple strict IR/depth nodes detected and Howdy is not already bound to one; rerun setup with --camera /dev/videoN".into())
 }
 
 fn cmd_pam(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {

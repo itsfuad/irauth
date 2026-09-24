@@ -4,13 +4,24 @@ on:
   pull_request:
 
 jobs:
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.74.1
+      - name: PAM build dependency
+        run: sudo apt-get update && sudo apt-get install -y libpam0g-dev
+      - run: ./scripts/validate-repo.sh
+      - run: cargo check --workspace --all-targets
+      - run: cargo test --workspace
+
   rust:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
       - name: PAM build dependency
         run: sudo apt-get update && sudo apt-get install -y libpam0g-dev
       - run: ./scripts/validate-repo.sh

@@ -15,8 +15,6 @@ Requires:       pamtester
 Requires:       v4l-utils
 Requires:       tpm2-tools
 Requires:       usbip
-Requires:       git
-Requires:       golang
 Requires:       fido2-tools
 
 %description

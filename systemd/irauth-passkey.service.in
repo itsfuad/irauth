@@ -1,4 +1,4 @@
-# Template/documentation only. `irauthctl passkey install` writes a per-user
+# Template/documentation only. `irauthctl passkey adopt` / `passkey install` writes a per-user
 # unit with absolute HOME paths and the pinned bridge binary.
 [Unit]
 Description=IRAuth TPM-backed virtual FIDO2 authenticator

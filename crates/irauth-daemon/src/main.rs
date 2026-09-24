@@ -1,4 +1,4 @@
-use irauth_backend_howdy::Backend;
+use irauth_backend_howdy::{configured_camera, Backend};
 use irauth_core::{decode_request, encode_response, DaemonStatus, Request, Response, SOCKET_GROUP, SOCKET_PATH};
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -108,7 +108,31 @@ fn authenticate(peer_uid: u32, user: &str, reason: &str, state: &State) -> Respo
         Ok(lock) => lock,
         Err(_) => return Response::Error("authentication lock poisoned".into()),
     };
-    eprintln!("irauthd: face verification requested user={user} reason={reason}");
+
+    // Enforce the hardware policy at the moment of authentication, not just at
+    // installation. This prevents a later Howdy reconfiguration from silently
+    // redirecting IRAuth to an ordinary RGB camera while an IR node still exists.
+    let configured = match configured_camera() {
+        Ok(Some(camera)) => camera,
+        Ok(None) => return Response::Error("Howdy camera is not configured".into()),
+        Err(err) => {
+            eprintln!("irauthd: cannot read Howdy camera configuration: {err}");
+            return Response::Error("Howdy camera configuration error".into());
+        }
+    };
+    match irauth_hardware::strict_device_for_path(&configured.device_path) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            eprintln!("irauthd: denied non-IR Howdy camera {}", configured.device_path.display());
+            return Response::Error("Howdy is not bound to a strict IR/depth camera".into());
+        }
+        Err(err) => {
+            eprintln!("irauthd: camera policy check failed: {err}");
+            return Response::Error("camera policy error".into());
+        }
+    }
+
+    eprintln!("irauthd: face verification requested user={user} reason={reason} camera={}", configured.device_path.display());
     match state.backend.authenticate(user, reason) {
         Ok(result) if result.approved => {
             eprintln!("irauthd: APPROVED user={user}");
@@ -127,9 +151,14 @@ fn authenticate(peer_uid: u32, user: &str, reason: &str, state: &State) -> Respo
 
 fn status(backend: &Backend) -> DaemonStatus {
     let preflight = backend.preflight();
+    let camera_strict = configured_camera()
+        .ok()
+        .flatten()
+        .and_then(|c| irauth_hardware::strict_device_for_path(&c.device_path).ok().flatten())
+        .is_some();
     DaemonStatus {
-        backend: if preflight.howdy && preflight.pamtester && preflight.missing_models.is_empty() {
-            "howdy-ready".into()
+        backend: if preflight.howdy && preflight.pamtester && preflight.missing_models.is_empty() && camera_strict {
+            "howdy-ready-ir-bound".into()
         } else {
             "howdy-incomplete".into()
         },

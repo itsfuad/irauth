@@ -17,6 +17,7 @@ pub struct Diagnosis {
 
 pub fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     match args.first().map(String::as_str) {
+        Some("adopt") => adopt(),
         Some("install") => install(),
         Some("start") => systemctl(&["start", SERVICE_NAME]),
         Some("stop") => systemctl(&["stop", SERVICE_NAME]),
@@ -26,7 +27,7 @@ pub fn cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Some("test") => test(),
-        _ => Err("usage: irauthctl passkey install|start|stop|status|test".into()),
+        _ => Err("usage: irauthctl passkey adopt|install|start|stop|status|test".into()),
     }
 }
 
@@ -48,28 +49,20 @@ pub fn diagnose() -> Diagnosis {
 }
 
 fn install() -> Result<(), Box<dyn std::error::Error>> {
-    if unsafe { geteuid() } == 0 {
-        return Err("passkey install must run as the desktop user, not through sudo".into());
-    }
+    require_desktop_user()?;
     require_command("git")?;
-    require_command("go")?;
+    require_command("go").map_err(|_| "the optional v0.1 CTAP2 transport is built from a pinned upstream Go project; install Go or use `irauthctl passkey adopt` with an existing howdy-bridge binary")?;
     require_command("systemctl")?;
     require_command("usbip")?;
-    if !Path::new("/dev/tpmrm0").exists() {
-        return Err("strict passkey mode requires TPM 2.0 at /dev/tpmrm0".into());
-    }
-    fs::OpenOptions::new().read(true).write(true).open("/dev/tpmrm0")
-        .map_err(|e| format!("TPM is not accessible in this login session ({e}); log out/in after setup so the tss group becomes active"))?;
+    require_tpm_access()?;
 
     let home = home_dir()?;
     let source = home.join(".local/share/irauth/howdy-as-passkey");
     let bin_dir = home.join(".local/bin");
     let config = home.join(".config/howdy-passkey-bridge");
-    let unit_dir = home.join(".config/systemd/user");
     fs::create_dir_all(source.parent().unwrap_or(&home))?;
     fs::create_dir_all(&bin_dir)?;
     fs::create_dir_all(&config)?;
-    fs::create_dir_all(&unit_dir)?;
 
     checkout_upstream(&source)?;
     let binary = bin_dir.join("howdy-bridge");
@@ -99,6 +92,38 @@ fn install() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    configure_service(&binary, &config)?;
+    println!("IRAuth passkey bridge installed and TPM-bound.");
+    Ok(())
+}
+
+/// Adopt an existing manual howdy-as-passkey installation without building any
+/// Go code. This is the preferred migration path for users who already have a
+/// working TPM-backed bridge and preserves their existing WebAuthn credentials.
+fn adopt() -> Result<(), Box<dyn std::error::Error>> {
+    require_desktop_user()?;
+    require_command("systemctl")?;
+    require_command("usbip")?;
+    require_tpm_access()?;
+    let home = home_dir()?;
+    let binary = home.join(".local/bin/howdy-bridge");
+    let config = home.join(".config/howdy-passkey-bridge");
+    if !binary.is_file() {
+        return Err(format!("existing bridge binary not found at {}; use `irauthctl passkey install` for a fresh setup", binary.display()).into());
+    }
+    let sealed = config.join("vault.key.tpm");
+    if !sealed.is_file() {
+        return Err(format!("TPM-sealed passkey key not found at {}; IRAuth will not adopt a software-only vault", sealed.display()).into());
+    }
+    configure_service(&binary, &config)?;
+    println!("Adopted the existing TPM-backed passkey bridge; existing credentials were left untouched.");
+    Ok(())
+}
+
+fn configure_service(binary: &Path, config: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let home = home_dir()?;
+    let unit_dir = home.join(".config/systemd/user");
+    fs::create_dir_all(&unit_dir)?;
     let unit = unit_dir.join(SERVICE_NAME);
     let body = format!(r#"[Unit]
 Description=IRAuth TPM-backed virtual FIDO2 authenticator
@@ -121,7 +146,23 @@ WantedBy=default.target
     let _ = Command::new("systemctl").args(["--user", "disable", "--now", "howdy-passkey-bridge.service"]).status();
     systemctl(&["daemon-reload"])?;
     systemctl(&["enable", "--now", SERVICE_NAME])?;
-    println!("IRAuth passkey bridge installed and TPM-bound.");
+    Ok(())
+}
+
+fn require_desktop_user() -> Result<(), Box<dyn std::error::Error>> {
+    if unsafe { geteuid() } == 0 {
+        Err("passkey commands must run as the desktop user, not through sudo".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn require_tpm_access() -> Result<(), Box<dyn std::error::Error>> {
+    if !Path::new("/dev/tpmrm0").exists() {
+        return Err("strict passkey mode requires TPM 2.0 at /dev/tpmrm0".into());
+    }
+    fs::OpenOptions::new().read(true).write(true).open("/dev/tpmrm0")
+        .map_err(|e| format!("TPM is not accessible in this login session ({e}); log out/in after setup so the tss group becomes active"))?;
     Ok(())
 }
 

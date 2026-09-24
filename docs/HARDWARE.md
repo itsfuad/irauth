@@ -17,3 +17,7 @@ Ordinary RGB devices remain visible in `irauthctl hardware` but show
 The repository intentionally ships no guessed VID:PID entries. Verified IDs
 should be added through reviewed contributions with model name, kernel version,
 video-node evidence and an IR-frame test.
+
+IRAuth also validates the configured backend path at runtime. It is not enough
+for an IR camera merely to be present: Howdy's exact `device_path` must resolve
+to one of the strict nodes for each authentication ceremony.

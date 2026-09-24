@@ -35,6 +35,29 @@ pub fn strict_devices() -> io::Result<Vec<VideoDevice>> {
     Ok(probe()?.into_iter().filter(|d| d.evidence.is_strict()).collect())
 }
 
+/// Resolve a configured V4L2 path (including /dev/v4l/by-path symlinks) and
+/// return the strict device it identifies. A missing/unresolvable device is not
+/// accepted: callers should fail closed rather than fall back to another camera.
+pub fn strict_device_for_path(path: &Path) -> io::Result<Option<VideoDevice>> {
+    let configured = match fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    for device in strict_devices()? {
+        if let Ok(node) = fs::canonicalize(&device.node) {
+            if node == configured {
+                return Ok(Some(device));
+            }
+        }
+    }
+    Ok(None)
+}
+
+pub fn is_strict_device_path(path: &Path) -> io::Result<bool> {
+    Ok(strict_device_for_path(path)?.is_some())
+}
+
 pub fn probe_at(sys_root: &Path, verified_ids_path: &Path) -> io::Result<Vec<VideoDevice>> {
     let verified = read_verified_ids(verified_ids_path).unwrap_or_default();
     let mut devices = Vec::new();

@@ -11,6 +11,9 @@ for crate in irauth-core irauth-hardware irauth-backend-howdy irauth-daemon irau
   test -f "crates/$crate/Cargo.toml"
 done
 grep -q 'strict_devices' crates/irauthctl/src/main.rs
+grep -q 'configured_camera' crates/irauth-daemon/src/main.rs
+grep -q 'strict_device_for_path' crates/irauth-daemon/src/main.rs
+grep -q 'Some("adopt")' crates/irauth-passkey/src/lib.rs
 grep -Fq 'crate-type = ["cdylib"]' crates/pam-irauth/Cargo.toml
 grep -q 'PINNED_COMMIT' crates/irauth-passkey/src/lib.rs
 grep -q 'TPM 2.0 is required' crates/irauthctl/src/main.rs

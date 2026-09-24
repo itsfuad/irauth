@@ -1,6 +1,7 @@
 # Architecture
 
-IRAuth separates **biometric recognition** from **system authentication**.
+IRAuth separates **hardware policy**, **biometric recognition**, and **system
+authentication**.
 
 ```text
 PAM consumer (sudo / GDM / polkit / pamtester)
@@ -10,12 +11,14 @@ PAM consumer (sudo / GDM / polkit / pamtester)
  /run/irauth/irauthd.sock
         |
         v
-     irauthd  -- peer UID policy + serialization + rate limit
+     irauthd  -- SO_PEERCRED + serialization + rate limit
+        |
+        +--> re-read Howdy device_path
+        |        |
+        |        +--> strict IR/depth hardware policy (fail closed)
         |
         v
-  Howdy backend (v0.1)
-        |
-        +--> Linux-visible IR/depth camera
+  Howdy backend (v0.1) --> accepted Linux IR/depth camera
 
 Browser -> CTAP2 virtual authenticator -> pamtester irauth-passkey
                                       -> pam_irauth.so -> irauthd -> Howdy
@@ -31,3 +34,9 @@ The hardware layer refuses ordinary RGB cameras by default. A device is strict
 only when its Linux video-node name explicitly identifies IR/depth hardware or
 its USB VID:PID is present in `/etc/irauth/hardware.ids` after manual hardware
 verification.
+
+Crucially, hardware validation is not only an installation check. Before every
+face ceremony, `irauthd` reads Howdy's `[video] device_path`, resolves symlinks
+such as `/dev/v4l/by-path/...`, and confirms that exact node still satisfies the
+strict hardware policy. Changing Howdy later to a normal RGB webcam therefore
+causes IRAuth authentication to fail closed.

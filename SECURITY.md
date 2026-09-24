@@ -8,7 +8,9 @@ method configured.
 
 1. **No RGB downgrade.** Strict setup stops unless Linux exposes an IR/depth
    video node or its exact USB VID:PID is explicitly verified in
-   `/etc/irauth/hardware.ids`.
+   `/etc/irauth/hardware.ids`. Setup binds Howdy to that accepted node, and
+   `irauthd` re-checks Howdy's exact `device_path` before every authentication.
+   A later switch to an RGB webcam therefore fails closed.
 2. **Fresh verification.** `pam_irauth.so` does not cache success. Every PAM or
    WebAuthn ceremony asks `irauthd`, which invokes the face backend again.
 3. **Fail closed.** Missing daemon, malformed IPC, Howdy failure, missing models,
@@ -18,10 +20,10 @@ method configured.
    PAM-selected account.
 5. **Serialized camera access.** Face checks are serialized to avoid races and
    accidental cross-talk on integrated cameras.
-6. **Hardware-bound passkeys.** `irauthctl passkey install` requires TPM 2.0.
-   The pinned FIDO2 bridge seals its vault key to the TPM and uses TPM-generated
-   credential keys. IRAuth intentionally does not expose its software-only mode
-   through the strict installer.
+6. **Hardware-bound passkeys.** `irauthctl passkey adopt` and `passkey install`
+   require TPM 2.0. The pinned v0.1 FIDO2 transport seals its vault key to the
+   TPM and uses TPM-generated credential keys. IRAuth intentionally does not
+   expose its software-only mode through the strict commands.
 
 ## Trust boundaries
 

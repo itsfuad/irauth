@@ -13,6 +13,15 @@ const REQUIRED_DLIB_MODELS: &[&str] = &[
     "shape_predictor_5_face_landmarks.dat",
 ];
 
+const HOWDY_CONFIGS: &[&str] = &[
+    "/usr/local/etc/howdy/config.ini",
+    "/etc/howdy/config.ini",
+    "/lib/security/howdy/config.ini",
+    "/usr/lib/security/howdy/config.ini",
+    "/usr/lib64/howdy/config.ini",
+    "/usr/local/lib64/howdy/config.ini",
+];
+
 const DLIB_DIRS: &[&str] = &[
     "/usr/local/share/dlib-data",
     "/usr/share/dlib-data",
@@ -37,6 +46,12 @@ pub struct Preflight {
 pub struct AuthResult {
     pub approved: bool,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CameraConfig {
+    pub config_path: PathBuf,
+    pub device_path: PathBuf,
 }
 
 impl Default for Backend {
@@ -105,6 +120,42 @@ impl Backend {
     }
 }
 
+pub fn find_howdy_config() -> Option<PathBuf> {
+    HOWDY_CONFIGS.iter().map(PathBuf::from).find(|p| p.is_file())
+}
+
+pub fn configured_camera() -> io::Result<Option<CameraConfig>> {
+    let Some(config_path) = find_howdy_config() else { return Ok(None) };
+    let content = fs::read_to_string(&config_path)?;
+    let Some(device) = parse_video_device_path(&content) else { return Ok(None) };
+    if device.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    Ok(Some(CameraConfig { config_path, device_path: PathBuf::from(device) }))
+}
+
+/// Bind Howdy's [video] device_path to an already-validated IR/depth V4L2
+/// node. The caller is responsible for enforcing the hardware policy first.
+pub fn bind_camera(device: &Path) -> io::Result<PathBuf> {
+    if !device.is_absolute() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "camera path must be absolute"));
+    }
+    let config = find_howdy_config()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Howdy config.ini not found"))?;
+    let content = fs::read_to_string(&config)?;
+    let updated = replace_video_device_path(&content, &device.to_string_lossy())?;
+    let backup = PathBuf::from(format!("{}.irauth.bak", config.display()));
+    if !backup.exists() {
+        fs::copy(&config, &backup)?;
+    }
+    let metadata = fs::metadata(&config)?;
+    let tmp = PathBuf::from(format!("{}.irauth.tmp", config.display()));
+    fs::write(&tmp, updated)?;
+    fs::set_permissions(&tmp, metadata.permissions())?;
+    fs::rename(&tmp, &config)?;
+    Ok(config)
+}
+
 pub fn find_dlib_dir() -> Option<PathBuf> {
     DLIB_DIRS.iter().map(PathBuf::from).find(|p| p.exists())
 }
@@ -162,6 +213,66 @@ fn normalize_model_permissions(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn parse_video_device_path(content: &str) -> Option<String> {
+    let mut in_video = false;
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_video = line[1..line.len() - 1].trim().eq_ignore_ascii_case("video");
+            continue;
+        }
+        if !in_video { continue; }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        if key.trim().eq_ignore_ascii_case("device_path") {
+            let value = value.split(|c| c == '#' || c == ';').next().unwrap_or("").trim();
+            if !value.is_empty() { return Some(value.to_owned()); }
+        }
+    }
+    None
+}
+
+fn replace_video_device_path(content: &str, device: &str) -> io::Result<String> {
+    let mut out = Vec::<String>::new();
+    let mut in_video = false;
+    let mut saw_video = false;
+    let mut replaced = false;
+    for raw in content.lines() {
+        let trimmed = raw.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if in_video && !replaced {
+                out.push(format!("device_path = {device}"));
+                replaced = true;
+            }
+            in_video = trimmed[1..trimmed.len() - 1].trim().eq_ignore_ascii_case("video");
+            saw_video |= in_video;
+            out.push(raw.to_owned());
+            continue;
+        }
+        if in_video {
+            if let Some((key, _)) = trimmed.split_once('=') {
+                if key.trim().eq_ignore_ascii_case("device_path") {
+                    out.push(format!("device_path = {device}"));
+                    replaced = true;
+                    continue;
+                }
+            }
+        }
+        out.push(raw.to_owned());
+    }
+    if !saw_video {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Howdy config has no [video] section"));
+    }
+    if !replaced {
+        out.push(format!("device_path = {device}"));
+    }
+    let mut result = out.join("\n");
+    result.push('\n');
+    Ok(result)
+}
+
 fn command_exists(command: &str) -> bool {
     if command.contains('/') {
         return Path::new(command).is_file();
@@ -201,5 +312,19 @@ mod tests {
         assert!(valid_username("alice-1"));
         assert!(!valid_username("../root"));
         assert!(!valid_username("a b"));
+    }
+
+    #[test]
+    fn parses_howdy_video_device() {
+        let ini = "[core]\ndetection_notice = false\n[video]\ndevice_path = /dev/video2 # IR\n";
+        assert_eq!(parse_video_device_path(ini).as_deref(), Some("/dev/video2"));
+    }
+
+    #[test]
+    fn rewrites_howdy_video_device() {
+        let ini = "[video]\nfoo = bar\ndevice_path = /dev/video0\n[core]\nx = y\n";
+        let got = replace_video_device_path(ini, "/dev/video2").unwrap();
+        assert!(got.contains("device_path = /dev/video2"));
+        assert!(!got.contains("device_path = /dev/video0"));
     }
 }
