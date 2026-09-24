@@ -26,6 +26,8 @@ Setup will:
   `dlib-data/install.sh` is present;
 - create a face-only `irauth-howdy` PAM service from the already-working Howdy
   PAM line;
+- back up active direct Howdy PAM entries and route them through `pam_irauth.so`
+  so an old Howdy hook cannot bypass the strict camera policy;
 - enroll a face when Howdy has no model for the target account;
 - create `irauth`, `usbip` memberships and add the user to `tss` when present;
 - install the USB/IP udev rule and persistent `vhci-hcd` module load;

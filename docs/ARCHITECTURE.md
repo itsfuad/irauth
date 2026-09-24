@@ -40,3 +40,13 @@ face ceremony, `irauthd` reads Howdy's `[video] device_path`, resolves symlinks
 such as `/dev/v4l/by-path/...`, and confirms that exact node still satisfies the
 strict hardware policy. Changing Howdy later to a normal RGB webcam therefore
 causes IRAuth authentication to fail closed.
+
+## PAM migration
+
+IRAuth first captures the existing Howdy PAM module line for its private
+`irauth-howdy` backend service. Setup then backs up other active direct Howdy
+entries and replaces those entry points with `pam_irauth.so`. This matters for
+the no-RGB-downgrade invariant: leaving a legacy direct Howdy hook later in a
+PAM stack would let that hook authenticate independently of `irauthd`'s hardware
+check. The migration manifest and per-service backups are restored by the
+uninstaller.

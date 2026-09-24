@@ -10,7 +10,9 @@ method configured.
    video node or its exact USB VID:PID/interface selector is explicitly verified in
    `/etc/irauth/hardware.ids`. Setup binds Howdy to that accepted node, and
    `irauthd` re-checks Howdy's exact `device_path` before every authentication.
-   A later switch to an RGB webcam therefore fails closed.
+   A later switch to an RGB webcam therefore fails closed. During setup, active
+   direct Howdy PAM entries are backed up and routed through `pam_irauth.so`;
+   otherwise those legacy entries could bypass IRAuth's hardware policy.
 2. **Fresh verification.** `pam_irauth.so` does not cache success. Every PAM or
    WebAuthn ceremony asks `irauthd`, which invokes the face backend again.
 3. **Fail closed.** Missing daemon, malformed IPC, Howdy failure, missing models,
