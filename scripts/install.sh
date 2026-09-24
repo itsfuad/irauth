@@ -77,10 +77,34 @@ echo "==> installing binaries and PAM module"
 install -Dm0755 target/release/irauthd /usr/local/bin/irauthd
 install -Dm0755 target/release/irauthctl /usr/local/bin/irauthctl
 install -Dm0755 target/release/libpam_irauth.so "$PAM_DIR/pam_irauth.so"
-install -Dm0644 systemd/irauthd.service /usr/lib/systemd/system/irauthd.service
-install -Dm0644 udev/70-irauth-vhci.rules /etc/udev/rules.d/70-irauth-vhci.rules
-install -Dm0644 config/hardware.ids /etc/irauth/hardware.ids
-install -Dm0644 pam/irauth-passkey /etc/pam.d/irauth-passkey
+install -d -m0755 /etc/irauth
+systemd_unit=/usr/lib/systemd/system/irauthd.service
+if [[ -e "$systemd_unit" || -L "$systemd_unit" ]]; then
+  if cmp -s systemd/irauthd.service "$systemd_unit"; then
+    echo "==> systemd unit already configured"
+  else
+    echo "==> preserving existing $systemd_unit"
+  fi
+else
+  install -Dm0644 systemd/irauthd.service "$systemd_unit"
+  touch /etc/irauth/.created-daemon-unit
+fi
+for config_pair in \
+  "udev/70-irauth-vhci.rules:/etc/udev/rules.d/70-irauth-vhci.rules" \
+  "config/hardware.ids:/etc/irauth/hardware.ids" \
+  "pam/irauth-passkey:/etc/pam.d/irauth-passkey"; do
+  source_file="${config_pair%%:*}"
+  target_file="${config_pair#*:}"
+  if [[ -e "$target_file" || -L "$target_file" ]]; then
+    echo "==> preserving existing $target_file"
+  else
+    install -Dm0644 "$source_file" "$target_file"
+    case "$target_file" in
+      /etc/udev/rules.d/70-irauth-vhci.rules) touch /etc/irauth/.created-vhci-rule ;;
+      /etc/pam.d/irauth-passkey) touch /etc/irauth/.created-passkey-pam ;;
+    esac
+  fi
+done
 
 systemctl daemon-reload
 udevadm control --reload

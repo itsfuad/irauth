@@ -70,6 +70,17 @@ distro paths; the runtime machine does not compile IRAuth when installing the
 RPM. The convenience `scripts/install.sh` is a source installer and does build
 on the target. Debian/Ubuntu package metadata is not yet maintained; those
 systems currently use the source installer. Howdy remains a separately trusted
-prerequisite. `scripts/uninstall.sh` restores IRAuth-managed PAM/Howdy backups
-and removes system integration files but deliberately leaves per-user passkey
-vaults and TPM material untouched.
+prerequisite. `scripts/uninstall.sh` stops the user's passkey service when its
+user manager is available, restores IRAuth-managed PAM/Howdy backups, and removes
+only system integration files marked as created by the source installer. It
+leaves existing user unit files, verified `hardware.ids`, groups, per-user
+passkey vaults, and TPM material untouched. For an RPM installation, restore
+PAM first with `sudo irauthctl pam disable SERVICE`, then use:
+
+```bash
+sudo dnf remove irauth
+```
+
+If the user manager was unavailable during removal, disable the user service
+from that user's session with `systemctl --user disable --now
+irauth-passkey.service`.
