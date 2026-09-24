@@ -1,0 +1,15 @@
+# Template/documentation only. `irauthctl passkey install` writes a per-user
+# unit with absolute HOME paths and the pinned bridge binary.
+[Unit]
+Description=IRAuth TPM-backed virtual FIDO2 authenticator
+After=graphical-session.target irauthd.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/howdy-bridge --pam-service irauth-passkey --vault %h/.config/howdy-passkey-bridge/vault.json
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

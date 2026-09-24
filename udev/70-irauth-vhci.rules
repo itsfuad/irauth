@@ -1,0 +1,4 @@
+# IRAuth: allow only members of usbip to attach/detach the local virtual FIDO
+# authenticator. Keep usbip group membership limited to intended human users.
+ACTION=="add|change", SUBSYSTEM=="platform", KERNEL=="vhci_hcd.0", \
+  RUN+="/bin/sh -c 'chgrp usbip /sys$env{DEVPATH}/attach /sys$env{DEVPATH}/detach && chmod 0660 /sys$env{DEVPATH}/attach /sys$env{DEVPATH}/detach'"
