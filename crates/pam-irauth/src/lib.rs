@@ -1,7 +1,7 @@
 use irauth_core::{encode_request, Request, SOCKET_PATH};
 use std::ffi::CStr;
 use std::io::{BufRead, BufReader, Write};
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::net::UnixStream;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
@@ -11,19 +11,14 @@ const PAM_SERVICE_ERR: c_int = 3;
 const PAM_SYSTEM_ERR: c_int = 4;
 const PAM_AUTH_ERR: c_int = 7;
 
-#[repr(C)]
-pub struct pam_handle_t {
-    _private: [u8; 0],
-}
-
 #[link(name = "pam")]
 extern "C" {
-    fn pam_get_user(pamh: *mut pam_handle_t, user: *mut *const c_char, prompt: *const c_char) -> c_int;
+    fn pam_get_user(pamh: *mut c_void, user: *mut *const c_char, prompt: *const c_char) -> c_int;
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pam_sm_authenticate(
-    pamh: *mut pam_handle_t,
+    pamh: *mut c_void,
     _flags: c_int,
     argc: c_int,
     argv: *const *const c_char,
@@ -33,7 +28,7 @@ pub unsafe extern "C" fn pam_sm_authenticate(
 
 #[no_mangle]
 pub unsafe extern "C" fn pam_sm_setcred(
-    _pamh: *mut pam_handle_t,
+    _pamh: *mut c_void,
     _flags: c_int,
     _argc: c_int,
     _argv: *const *const c_char,
@@ -41,7 +36,7 @@ pub unsafe extern "C" fn pam_sm_setcred(
     PAM_SUCCESS
 }
 
-fn authenticate_inner(pamh: *mut pam_handle_t, argc: c_int, argv: *const *const c_char) -> c_int {
+fn authenticate_inner(pamh: *mut c_void, argc: c_int, argv: *const *const c_char) -> c_int {
     if pamh.is_null() { return PAM_SERVICE_ERR; }
     let mut user_ptr: *const c_char = std::ptr::null();
     let rc = unsafe { pam_get_user(pamh, &mut user_ptr, std::ptr::null()) };
