@@ -1,0 +1,8 @@
+# Strict IRAuth hardware allow-list, one lowercase USB VID:PID per line.
+#
+# Leave this file empty unless the exact device has been verified to expose an
+# IR/depth stream on Linux. IRAuth also accepts video nodes whose kernel-visible
+# name explicitly contains IR/infrared/depth.
+#
+# Example format only (NOT an approved device):
+# 1234:abcd

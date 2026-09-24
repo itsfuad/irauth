@@ -1,0 +1,60 @@
+# Security model
+
+IRAuth is security-sensitive software and v0.1 has **not** received an
+independent security audit. Keep a password and a second GitHub/2FA recovery
+method configured.
+
+## Security invariants
+
+1. **No RGB downgrade.** Strict setup stops unless Linux exposes an IR/depth
+   video node or its exact USB VID:PID is explicitly verified in
+   `/etc/irauth/hardware.ids`.
+2. **Fresh verification.** `pam_irauth.so` does not cache success. Every PAM or
+   WebAuthn ceremony asks `irauthd`, which invokes the face backend again.
+3. **Fail closed.** Missing daemon, malformed IPC, Howdy failure, missing models,
+   timeout/failure in PAM, or peer-policy failure returns authentication error.
+4. **Peer identity.** `irauthd` reads `SO_PEERCRED`. A non-root client may only
+   request face verification for its own UID; root PAM consumers may request the
+   PAM-selected account.
+5. **Serialized camera access.** Face checks are serialized to avoid races and
+   accidental cross-talk on integrated cameras.
+6. **Hardware-bound passkeys.** `irauthctl passkey install` requires TPM 2.0.
+   The pinned FIDO2 bridge seals its vault key to the TPM and uses TPM-generated
+   credential keys. IRAuth intentionally does not expose its software-only mode
+   through the strict installer.
+
+## Trust boundaries
+
+The PAM module is intentionally small: it gets the PAM user, sends a local
+request, and maps only an explicit `OK` response to `PAM_SUCCESS`. Recognition,
+hardware policy and process execution stay out of the PAM consumer.
+
+`irauthd` runs as root because login managers and PAM consumers must be able to
+authenticate users before a user session exists. Its systemd unit uses a
+read-only filesystem view, namespace restrictions, `NoNewPrivileges`, and a
+minimal writable runtime directory. Root compromise remains game-over: an
+attacker with root can replace PAM configuration or the daemon and ask the TPM
+to sign.
+
+The v0.1 biometric backend is Howdy. Howdy itself warns that it is not a
+password replacement and has not got the secure camera path/anti-spoofing
+properties of commercial Windows Hello implementations. IR/depth hardware is a
+required baseline, not a claim of Windows Hello certification.
+
+## SELinux
+
+IRAuth does not disable SELinux and the installer must not add permissive rules.
+The initial Fedora release runs under the distribution's normal service/PAM
+labels. If enforcing SELinux blocks a particular camera/backend path, collect
+the AVC denial and add a narrowly scoped policy in a reviewed release rather
+than using `setenforce 0` or broad `audit2allow` output.
+
+## Recovery
+
+PAM edits are inserted as `sufficient`, so failure falls through to the
+existing password stack. Before modifying a PAM service IRAuth creates
+`/etc/pam.d/<service>.irauth.bak`. `irauthctl pam disable SERVICE` restores it.
+The uninstall script also attempts restoration.
+
+For passkeys, keep the upstream pre-TPM vault backup if one was created during
+migration. Clearing/replacing the TPM can make TPM-bound credentials unusable.
