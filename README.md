@@ -80,6 +80,12 @@ Troubleshooting: if authentication fails with socket `Permission denied`, check
 sessions. A missing socket immediately after startup is retried during setup;
 for runtime issues check `systemctl status irauthd` and `journalctl -u irauthd`.
 Howdy face timeouts fail closed; check the configured IR node and Howdy logs.
+If the same person authenticates in one room/lighting but times out in another,
+Howdy's enrolled appearance may not cover both capture conditions. Check existing
+models with `sudo howdy -U USER list`; you can add a separate model under the
+other typical conditions with `sudo irauthctl enroll USER`. Keep the original
+model and verify both scenarios before removing anything. This changes Howdy
+face models only, not WebAuthn credentials or the TPM-backed passkey vault.
 TPM access requires active `tss` membership. Check passkey service state with
 `irauthctl passkey status`; use `irauthctl passkey test` for PAM and USB device
 checks.
