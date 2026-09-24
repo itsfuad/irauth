@@ -341,6 +341,7 @@ fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         Command::new("systemctl").args(["enable", "--now", "irauthd.service"]),
         "enable irauthd",
     )?;
+    wait_for_daemon_ready()?;
 
     // Exercise the complete daemon path before routing an existing PAM service
     // through IRAuth. A failed validation leaves the host PAM configuration
@@ -826,6 +827,24 @@ fn apply_vhci_permissions() -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
     Ok(())
+}
+
+fn wait_for_daemon_ready() -> Result<(), Box<dyn std::error::Error>> {
+    let mut last_error = String::from("daemon socket was not ready");
+    for _ in 0..50 {
+        match daemon_request(Request::Ping) {
+            Ok(response) if response.starts_with("PONG") => return Ok(()),
+            Ok(response) => {
+                last_error = format!("unexpected daemon response: {}", response.trim());
+            }
+            Err(err) => {
+                last_error = err.to_string();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    Err(format!("irauthd did not become ready within 5 seconds: {last_error}").into())
 }
 
 fn daemon_request(req: Request) -> io::Result<String> {
