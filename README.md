@@ -3,7 +3,7 @@
 IRAuth is a **Rust-first**, hardware-gated, Windows-Hello-style authentication
 stack for Linux. It refuses to silently downgrade to an ordinary RGB webcam:
 setup requires a Linux-visible IR/depth camera (or an explicitly verified USB
-ID), binds Howdy to that exact strict device, and re-checks the binding on every
+interface selector), binds Howdy to that exact strict device, and re-checks the binding on every
 authentication ceremony.
 
 The v0.1 recognition backend is **Howdy**. IRAuth wraps it in a Rust system

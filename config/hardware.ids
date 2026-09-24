@@ -1,8 +1,13 @@
-# Strict IRAuth hardware allow-list, one lowercase USB VID:PID per line.
+# Strict IRAuth hardware allow-list, one lowercase USB interface selector per line.
 #
-# Leave this file empty unless the exact device has been verified to expose an
-# IR/depth stream on Linux. IRAuth also accepts video nodes whose kernel-visible
-# name explicitly contains IR/infrared/depth.
+# Format: VID:PID@IFACE, where IFACE is the USB bInterfaceNumber for the exact
+# UVC interface that exposes the verified IR/depth stream. Matching only a
+# VID:PID is deliberately not accepted because many laptop camera modules expose
+# both RGB and IR interfaces under the same USB device ID.
+#
+# Leave this file empty unless the exact interface has been verified to expose
+# an IR/depth stream on Linux. IRAuth also accepts video nodes whose
+# kernel-visible name explicitly contains IR/infrared/depth.
 #
 # Example format only (NOT an approved device):
-# 1234:abcd
+# 1234:abcd@02

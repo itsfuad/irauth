@@ -64,7 +64,12 @@ fn cmd_hardware() -> Result<(), Box<dyn std::error::Error>> {
             Evidence::VerifiedUsbId => "verified USB ID",
             Evidence::None => "not accepted",
         };
-        println!("{}  {:<18}  {:<16}  {}", dev.node.display(), dev.usb_id.as_deref().unwrap_or("-"), evidence, dev.name);
+        let usb = match (&dev.usb_id, &dev.usb_interface) {
+            (Some(id), Some(interface)) => format!("{id}@{interface}"),
+            (Some(id), None) => id.clone(),
+            _ => "-".into(),
+        };
+        println!("{}  {:<22}  {:<16}  {}", dev.node.display(), usb, evidence, dev.name);
     }
     Ok(())
 }

@@ -7,7 +7,7 @@ method configured.
 ## Security invariants
 
 1. **No RGB downgrade.** Strict setup stops unless Linux exposes an IR/depth
-   video node or its exact USB VID:PID is explicitly verified in
+   video node or its exact USB VID:PID/interface selector is explicitly verified in
    `/etc/irauth/hardware.ids`. Setup binds Howdy to that accepted node, and
    `irauthd` re-checks Howdy's exact `device_path` before every authentication.
    A later switch to an RGB webcam therefore fails closed.

@@ -32,8 +32,8 @@ cameras cannot safely serve concurrent recognition processes.
 
 The hardware layer refuses ordinary RGB cameras by default. A device is strict
 only when its Linux video-node name explicitly identifies IR/depth hardware or
-its USB VID:PID is present in `/etc/irauth/hardware.ids` after manual hardware
-verification.
+its exact USB VID:PID/interface selector is present in
+`/etc/irauth/hardware.ids` after manual hardware verification.
 
 Crucially, hardware validation is not only an installation check. Before every
 face ceremony, `irauthd` reads Howdy's `[video] device_path`, resolves symlinks

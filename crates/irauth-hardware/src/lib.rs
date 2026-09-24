@@ -24,6 +24,7 @@ pub struct VideoDevice {
     pub node: PathBuf,
     pub name: String,
     pub usb_id: Option<String>,
+    pub usb_interface: Option<String>,
     pub evidence: Evidence,
 }
 
@@ -72,13 +73,17 @@ pub fn probe_at(sys_root: &Path, verified_ids_path: &Path) -> io::Result<Vec<Vid
         }
         let base = entry.path();
         let name = read_trimmed(base.join("name")).unwrap_or_else(|| file_name.clone());
-        let usb_id = find_usb_id(&base);
+        let (usb_id, usb_interface) = find_usb_info(&base).unwrap_or((None, None));
+        let selector = match (&usb_id, &usb_interface) {
+            (Some(id), Some(interface)) => Some(format!("{id}@{interface}")),
+            _ => None,
+        };
         let lower = name.to_ascii_lowercase();
         let evidence = if lower.contains("infrared") || token_ir(&lower) {
             Evidence::IrName
         } else if lower.contains("depth") || lower.contains("3d camera") {
             Evidence::DepthName
-        } else if usb_id.as_ref().is_some_and(|id| verified.contains(id)) {
+        } else if selector.as_ref().is_some_and(|id| verified.contains(id)) {
             Evidence::VerifiedUsbId
         } else {
             Evidence::None
@@ -87,6 +92,7 @@ pub fn probe_at(sys_root: &Path, verified_ids_path: &Path) -> io::Result<Vec<Vid
             node: PathBuf::from("/dev").join(file_name),
             name,
             usb_id,
+            usb_interface,
             evidence,
         });
     }
@@ -108,7 +114,7 @@ fn read_verified_ids(path: &Path) -> io::Result<BTreeSet<String>> {
     let mut ids = BTreeSet::new();
     for line in fs::read_to_string(path)?.lines() {
         let line = line.split('#').next().unwrap_or("").trim().to_ascii_lowercase();
-        if valid_usb_id(&line) {
+        if valid_usb_selector(&line) {
             ids.insert(line);
         }
     }
@@ -122,19 +128,30 @@ fn valid_usb_id(s: &str) -> bool {
         && vid.chars().chain(pid.chars()).all(|c| c.is_ascii_hexdigit())
 }
 
-fn find_usb_id(video_class: &Path) -> Option<String> {
+fn valid_usb_selector(s: &str) -> bool {
+    let Some((id, interface)) = s.split_once('@') else { return false };
+    valid_usb_id(id)
+        && interface.len() == 2
+        && interface.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn find_usb_info(video_class: &Path) -> Option<(Option<String>, Option<String>)> {
     let mut cur = fs::canonicalize(video_class.join("device")).ok()?;
+    let mut interface = None;
     loop {
+        if interface.is_none() {
+            interface = read_trimmed(cur.join("bInterfaceNumber")).map(|s| s.to_ascii_lowercase());
+        }
         let vid = read_trimmed(cur.join("idVendor"));
         let pid = read_trimmed(cur.join("idProduct"));
         if let (Some(vid), Some(pid)) = (vid, pid) {
             let id = format!("{}:{}", vid.to_ascii_lowercase(), pid.to_ascii_lowercase());
             if valid_usb_id(&id) {
-                return Some(id);
+                return Some((Some(id), interface));
             }
         }
         if !cur.pop() {
-            return None;
+            return Some((None, interface));
         }
     }
 }
@@ -162,6 +179,13 @@ mod tests {
         let devices = probe_at(&root, &ids).unwrap();
         assert_eq!(devices[0].evidence, Evidence::IrName);
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn verified_selector_requires_usb_interface() {
+        assert!(valid_usb_selector("1234:abcd@02"));
+        assert!(!valid_usb_selector("1234:abcd"));
+        assert!(!valid_usb_selector("1234:abcd@2"));
     }
 
     #[test]
