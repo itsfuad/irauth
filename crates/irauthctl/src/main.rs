@@ -29,7 +29,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("test") => cmd_test(args.get(1).map(String::as_str)),
         Some("setup") => cmd_setup(&args[1..]),
         Some("pam") => cmd_pam(&args[1..]),
-        Some("passkey") => irauth_passkey::cli(&args[1..]).map_err(Into::into),
+        Some("passkey") => irauth_passkey::cli(&args[1..]),
         Some("help") | Some("--help") | Some("-h") | None => { print_help(); Ok(()) }
         Some(other) => Err(format!("unknown command: {other}").into()),
     }
@@ -162,16 +162,19 @@ fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err("TPM 2.0 is required by strict setup; use --allow-no-tpm only for PAM-only evaluation (passkeys stay disabled)".into());
     }
 
+    if pam_module_path().is_none() {
+        return Err("pam_irauth.so is not installed; run the IRAuth installer/package before setup".into());
+    }
     let backend = Backend::default();
     let mut pf = backend.preflight();
     if !pf.howdy { return Err("Howdy is not installed; IRAuth v0.1 deliberately uses Howdy as its recognition backend".into()); }
     if !pf.pamtester { return Err("pamtester is not installed".into()); }
-    if !pf.missing_models.is_empty() {
-        println!("  repairing Howdy dlib model assets...");
+    if pf.dlib_dir.is_some() {
+        println!("  validating/repairing Howdy dlib model assets and permissions...");
         repair_dlib_assets()?;
         pf = backend.preflight();
-        if !pf.missing_models.is_empty() { return Err("Howdy dlib model repair did not complete".into()); }
     }
+    if !pf.missing_models.is_empty() { return Err("Howdy dlib model repair did not complete".into()); }
 
     ensure_group("irauth")?;
     ensure_group("usbip")?;
@@ -187,6 +190,7 @@ fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     write_modules_load()?;
     reload_udev()?;
     run_ok(Command::new("modprobe").arg("vhci-hcd"), "load vhci-hcd")?;
+    apply_vhci_permissions()?;
     run_ok(Command::new("systemctl").arg("daemon-reload"), "systemd daemon-reload")?;
     run_ok(Command::new("systemctl").args(["enable", "--now", "irauthd.service"]), "enable irauthd")?;
 
@@ -330,6 +334,17 @@ fn write_modules_load() -> Result<(), Box<dyn std::error::Error>> {
 
 fn reload_udev() -> Result<(), Box<dyn std::error::Error>> {
     run_ok(Command::new("udevadm").args(["control", "--reload"]), "reload udev")?;
+    Ok(())
+}
+
+fn apply_vhci_permissions() -> Result<(), Box<dyn std::error::Error>> {
+    let base = Path::new("/sys/devices/platform/vhci_hcd.0");
+    let attach = base.join("attach");
+    let detach = base.join("detach");
+    if attach.exists() && detach.exists() {
+        run_ok(Command::new("chgrp").arg("usbip").arg(&attach).arg(&detach), "set vhci group")?;
+        run_ok(Command::new("chmod").arg("0660").arg(&attach).arg(&detach), "set vhci permissions")?;
+    }
     Ok(())
 }
 

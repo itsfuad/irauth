@@ -20,9 +20,9 @@ const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
 
 #[repr(C)]
 struct UCred {
-    pid: c_int,
+    _pid: c_int,
     uid: u32,
-    gid: u32,
+    _gid: u32,
 }
 
 extern "C" {
@@ -149,7 +149,7 @@ fn rate_limit(uid: u32, map: &Mutex<HashMap<u32, Instant>>) -> bool {
 }
 
 fn peer_cred(stream: &UnixStream) -> io::Result<UCred> {
-    let mut cred = UCred { pid: 0, uid: u32::MAX, gid: u32::MAX };
+    let mut cred = UCred { _pid: 0, uid: u32::MAX, _gid: u32::MAX };
     let mut len = std::mem::size_of::<UCred>() as u32;
     let rc = unsafe {
         getsockopt(
@@ -169,7 +169,7 @@ fn uid_for_user(user: &str) -> Option<u32> {
         let name = p.next()?;
         let _pw = p.next()?;
         let uid = p.next()?;
-        (name == user).then(|| uid.parse().ok()).flatten()
+        if name == user { uid.parse().ok() } else { None }
     })
 }
 
@@ -179,7 +179,7 @@ fn gid_for_group(group: &str) -> Option<u32> {
         let name = p.next()?;
         let _pw = p.next()?;
         let gid = p.next()?;
-        (name == group).then(|| gid.parse().ok()).flatten()
+        if name == group { gid.parse().ok() } else { None }
     })
 }
 

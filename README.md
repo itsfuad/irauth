@@ -21,7 +21,7 @@ PAM, daemon IPC, diagnostics, hardware policy, or passkey integration.
 ## Fedora quick start
 
 ```bash
-sudo ./scripts/install.sh --configure
+sudo ./scripts/install.sh --configure --with-login
 ```
 
 The installer builds the Rust workspace, installs the daemon/PAM module,

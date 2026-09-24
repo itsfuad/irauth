@@ -73,7 +73,11 @@ pub fn decode_request(line: &str) -> Result<Request, ProtocolError> {
     }
     let mut parts = line.split('\t');
     let version = parts.next().ok_or(ProtocolError::Empty)?;
-    if version != format!("V{}", PROTOCOL_VERSION) {
+    let parsed_version = version
+        .strip_prefix('V')
+        .and_then(|v| v.parse::<u32>().ok())
+        .ok_or(ProtocolError::UnsupportedVersion)?;
+    if parsed_version != PROTOCOL_VERSION {
         return Err(ProtocolError::UnsupportedVersion);
     }
     match parts.next() {
