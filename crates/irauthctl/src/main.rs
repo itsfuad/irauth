@@ -322,14 +322,12 @@ fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Validate the recognition backend through an isolated PAM service before
+    // touching any existing system PAM stack.
     install_howdy_only_pam()?;
-    let migrated = migrate_direct_howdy_pam()?;
-    if migrated > 0 {
-        println!("  migrated {migrated} direct Howdy PAM service(s) through IRAuth");
-    }
-    install_passkey_pam()?;
     ensure_face_model(&backend, &user)?;
     test_howdy_path(&user)?;
+    install_passkey_pam()?;
 
     write_modules_load()?;
     reload_udev()?;
@@ -344,18 +342,152 @@ fn cmd_setup(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "enable irauthd",
     )?;
 
-    pam_enable("sudo")?;
+    // Exercise the complete daemon path before routing an existing PAM service
+    // through IRAuth. A failed validation leaves the host PAM configuration
+    // untouched.
+    println!("  verifying IRAuth daemon path; look at the IR camera...");
+    let response = daemon_request(Request::Authenticate {
+        user: user.clone(),
+        reason: "setup validation".into(),
+    })?;
+    if !response.starts_with("OK\t") {
+        return Err("face verification through irauthd failed".into());
+    }
+
+    // PAM changes are the lockout-sensitive part of setup. Snapshot the
+    // pre-migration state so a failed transaction can be rolled back fully.
+    let pam_snapshot = snapshot_pam_state()?;
+    let mut selected_services = vec!["sudo"];
     if Path::new("/etc/pam.d/polkit-1").exists() {
-        pam_enable("polkit-1")?;
+        selected_services.push("polkit-1");
+    }
+    if Path::new("/etc/pam.d/howdy-only").exists() {
+        selected_services.push("howdy-only");
     }
     if with_login && Path::new("/etc/pam.d/gdm-password").exists() {
-        pam_enable("gdm-password")?;
+        selected_services.push("gdm-password");
+    }
+
+    let pam_result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let migrated = migrate_direct_howdy_pam(&selected_services)?;
+        if migrated > 0 {
+            println!("  migrated {migrated} selected Howdy PAM service(s) through IRAuth");
+        }
+
+        pam_enable("sudo")?;
+        if Path::new("/etc/pam.d/polkit-1").exists() {
+            pam_enable("polkit-1")?;
+        }
+        if with_login && Path::new("/etc/pam.d/gdm-password").exists() {
+            pam_enable("gdm-password")?;
+        }
+        Ok(())
+    })();
+
+    if let Err(err) = pam_result {
+        eprintln!("  PAM setup failed; restoring the pre-setup PAM configuration...");
+        if let Err(rollback_err) = restore_pam_state(&pam_snapshot) {
+            return Err(
+                format!("PAM setup failed: {err}; rollback also failed: {rollback_err}").into(),
+            );
+        }
+        return Err(err);
     }
 
     println!("\nSystem authentication is configured.");
     println!("IMPORTANT: log out completely and log back in once so irauth/usbip/tss group membership reaches your user session.");
     println!("After login run: irauthctl passkey adopt (if you already use howdy-as-passkey) or irauthctl passkey install, then irauthctl doctor");
     Ok(())
+}
+
+struct PamFileSnapshot {
+    path: PathBuf,
+    content: Vec<u8>,
+    mode: u32,
+}
+
+struct PamSnapshot {
+    files: Vec<PamFileSnapshot>,
+    migrated_manifest: Option<PamFileSnapshot>,
+}
+
+fn snapshot_file(path: &Path) -> Result<PamFileSnapshot, Box<dyn std::error::Error>> {
+    Ok(PamFileSnapshot {
+        path: path.to_path_buf(),
+        content: fs::read(path)?,
+        mode: fs::metadata(path)?.permissions().mode() & 0o7777,
+    })
+}
+
+fn snapshot_pam_state() -> Result<PamSnapshot, Box<dyn std::error::Error>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir("/etc/pam.d")? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            files.push(snapshot_file(&entry.path())?);
+        }
+    }
+
+    let manifest_path = Path::new("/etc/irauth/pam-migrated.list");
+    let migrated_manifest = if manifest_path.is_file() {
+        Some(snapshot_file(manifest_path)?)
+    } else {
+        None
+    };
+
+    Ok(PamSnapshot {
+        files,
+        migrated_manifest,
+    })
+}
+
+fn restore_pam_state(snapshot: &PamSnapshot) -> Result<(), Box<dyn std::error::Error>> {
+    let mut failures = Vec::new();
+
+    for file in &snapshot.files {
+        if let Err(err) = atomic_write(&file.path, &file.content, file.mode) {
+            failures.push(format!("{}: {err}", file.path.display()));
+        }
+    }
+
+    // Remove transaction artifacts that did not exist before setup. Existing
+    // IRAuth backups are part of the snapshot and are preserved.
+    if let Ok(entries) = fs::read_dir("/etc/pam.d") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let existed_before = snapshot.files.iter().any(|file| file.path == path);
+            let is_transaction_artifact = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".irauth.bak") || name.ends_with(".irauth.tmp"));
+            if !existed_before && is_transaction_artifact {
+                if let Err(err) = fs::remove_file(&path) {
+                    failures.push(format!("{}: {err}", path.display()));
+                }
+            }
+        }
+    }
+
+    let manifest_path = Path::new("/etc/irauth/pam-migrated.list");
+    match &snapshot.migrated_manifest {
+        Some(file) => {
+            if let Err(err) = atomic_write(&file.path, &file.content, file.mode) {
+                failures.push(format!("{}: {err}", file.path.display()));
+            }
+        }
+        None if manifest_path.exists() => {
+            if let Err(err) = fs::remove_file(manifest_path) {
+                failures.push(format!("{}: {err}", manifest_path.display()));
+            }
+        }
+        None => {}
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("PAM rollback was incomplete: {}", failures.join("; ")).into())
+    }
 }
 
 fn select_camera(
@@ -466,7 +598,9 @@ fn install_howdy_only_pam() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn migrate_direct_howdy_pam() -> Result<usize, Box<dyn std::error::Error>> {
+fn migrate_direct_howdy_pam(
+    selected_services: &[&str],
+) -> Result<usize, Box<dyn std::error::Error>> {
     let mut migrated = Vec::<PathBuf>::new();
     for entry in fs::read_dir("/etc/pam.d")? {
         let entry = entry?;
@@ -476,6 +610,9 @@ fn migrate_direct_howdy_pam() -> Result<usize, Box<dyn std::error::Error>> {
         let path = entry.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if name.starts_with("irauth-") || name.ends_with(".irauth.bak") {
+            continue;
+        }
+        if !selected_services.contains(&name) {
             continue;
         }
         let content = match fs::read_to_string(&path) {
@@ -516,20 +653,48 @@ fn migrate_direct_howdy_pam() -> Result<usize, Box<dyn std::error::Error>> {
         atomic_write(&path, out.as_bytes(), 0o644)?;
         migrated.push(path);
     }
-    if !migrated.is_empty() {
-        fs::create_dir_all("/etc/irauth")?;
-        let mut manifest = String::new();
-        for path in &migrated {
-            manifest.push_str(&path.to_string_lossy());
-            manifest.push('\n');
-        }
-        atomic_write(
-            Path::new("/etc/irauth/pam-migrated.list"),
-            manifest.as_bytes(),
-            0o600,
-        )?;
-    }
+    refresh_migration_manifest()?;
     Ok(migrated.len())
+}
+
+fn refresh_migration_manifest() -> Result<(), Box<dyn std::error::Error>> {
+    let marker = "# IRAuth disabled direct Howdy PAM entry to enforce strict camera policy:";
+    let mut migrated = Vec::<PathBuf>::new();
+
+    for entry in fs::read_dir("/etc/pam.d")? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.ends_with(".irauth.bak") || name.ends_with(".irauth.tmp") {
+            continue;
+        }
+        if fs::read_to_string(&path)
+            .map(|content| content.contains(marker))
+            .unwrap_or(false)
+        {
+            migrated.push(path);
+        }
+    }
+
+    migrated.sort();
+    let manifest_path = Path::new("/etc/irauth/pam-migrated.list");
+    if migrated.is_empty() {
+        if manifest_path.exists() {
+            fs::remove_file(manifest_path)?;
+        }
+        return Ok(());
+    }
+
+    fs::create_dir_all("/etc/irauth")?;
+    let mut manifest = String::new();
+    for path in migrated {
+        manifest.push_str(&path.to_string_lossy());
+        manifest.push('\n');
+    }
+    atomic_write(manifest_path, manifest.as_bytes(), 0o600)
 }
 
 fn install_passkey_pam() -> Result<(), Box<dyn std::error::Error>> {
