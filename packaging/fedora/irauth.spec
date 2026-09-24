@@ -17,7 +17,7 @@ Requires:       tpm2-tools
 Requires:       usbip
 Requires:       git
 Requires:       golang
-Requires:       libfido2
+Requires:       fido2-tools
 
 %description
 IRAuth provides a Rust daemon, PAM module, hardware policy, diagnostics and a

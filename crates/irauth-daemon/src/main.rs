@@ -5,7 +5,7 @@ use std::ffi::CString;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
-use std::os::raw::{c_int, c_void};
+use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -27,7 +27,7 @@ struct UCred {
 
 extern "C" {
     fn getsockopt(fd: c_int, level: c_int, optname: c_int, optval: *mut c_void, optlen: *mut u32) -> c_int;
-    fn chown(path: *const i8, owner: u32, group: u32) -> c_int;
+    fn chown(path: *const c_char, owner: u32, group: u32) -> c_int;
 }
 
 struct State {

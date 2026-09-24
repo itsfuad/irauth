@@ -42,7 +42,7 @@ fi
 source /etc/os-release
 case "${ID:-}" in
   fedora)
-    dnf install -y rust cargo gcc pam-devel pamtester v4l-utils tpm2-tools usbip git golang libfido2
+    dnf install -y rust cargo gcc pam-devel pamtester v4l-utils tpm2-tools usbip git golang fido2-tools
     PAM_DIR=/usr/lib64/security
     ;;
   debian|ubuntu|linuxmint)

@@ -4,7 +4,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 const REQUIRED_DLIB_MODELS: &[&str] = &[
     "dlib_face_recognition_resnet_model_v1.dat",
@@ -67,18 +68,32 @@ impl Backend {
         if !valid_username(user) {
             return Ok(AuthResult { approved: false, detail: "invalid user name".into() });
         }
-        let output = Command::new("pamtester")
+        let mut child = Command::new("pamtester")
             .arg(&self.pam_service)
             .arg(user)
             .arg("authenticate")
             .env("IRAUTH_REASON", reason)
             .stdin(Stdio::null())
-            .output()?;
-        let detail = combined_output(&output.stdout, &output.stderr);
-        Ok(AuthResult {
-            approved: output.status.success(),
-            detail,
-        })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let started = Instant::now();
+        loop {
+            if child.try_wait()?.is_some() {
+                let output = child.wait_with_output()?;
+                let detail = combined_output(&output.stdout, &output.stderr);
+                return Ok(AuthResult { approved: output.status.success(), detail });
+            }
+            if started.elapsed() >= authentication_timeout_hint() {
+                let _ = child.kill();
+                let output = child.wait_with_output()?;
+                let mut detail = combined_output(&output.stdout, &output.stderr);
+                if !detail.is_empty() { detail.push_str(" | "); }
+                detail.push_str("IRAuth backend timeout after 30s");
+                return Ok(AuthResult { approved: false, detail });
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 
     pub fn enroll(&self, user: &str) -> io::Result<ExitStatus> {
